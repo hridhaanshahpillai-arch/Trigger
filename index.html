@@ -108,7 +108,47 @@ function layer(fn) {
   return ring(ring(G, false), true);
 }
 
-function renderGrid(f, p) {
+// greys that survive on the white fighters (for hat details and gun skin patterns); everything else turns white
+const G1 = '#343434', G2 = '#646464', G3 = '#a0a0a0', G4 = '#d7d7d7', KEEP = new Set([G1, G2, G3, G4]);
+// gun skins: black and white patterns painted over the gun
+function skinPixel(skin, x, y) {
+  const h = ((x * 73856093) ^ (y * 19349663)) >>> 0;
+  switch (skin) {
+    case 'skin_stripes': return (x + y) % 4 < 2 ? G2 : '#ffffff';
+    case 'skin_dots': return x % 3 === 0 && y % 2 === 0 ? G1 : '#ffffff';
+    case 'skin_checker': return ((x >> 1) + (y >> 1)) % 2 ? G1 : '#ffffff';
+    case 'skin_camo': { const n = (((x >> 2) * 7 + (y >> 1) * 13 + ((x + y) >> 3) * 5) % 4); return [G1, G2, G3, '#ffffff'][n]; }
+    case 'skin_zebra': return (x * 2 + y * 3 + (h % 2)) % 6 < 2 ? G1 : '#ffffff';
+    case 'skin_chrome': return y % 3 === 0 ? G3 : (x + y) % 7 === 0 ? G2 : '#ffffff';
+    case 'skin_shadow': return x % 5 === 0 ? G2 : G1;
+    case 'skin_tiger': return (x + ((y * 3) % 5)) % 5 < 2 ? G1 : G3;
+    default: return '#ffffff';
+  }
+}
+// hats, drawn on the head (hc is the middle of the head, facing right)
+function drawHat(hat, hc) {
+  const W_ = '#ffffff', [x, y] = hc;
+  switch (hat) {
+    case 'hat_cap': disc(x, y - 1, 5, W_, (a, b) => b <= y - 2); rect(x + 2, y - 3, 6, 2, W_); rect(x - 4, y - 3, 6, 1, G2); break;
+    case 'hat_headband': rect(x - 5, y - 3, 11, 2, G1); rect(x - 9, y - 2, 4, 1, G1); rect(x - 10, y - 1, 3, 1, G1); break;
+    case 'hat_beanie': disc(x, y - 1, 6, W_, (a, b) => b <= y - 1); rect(x - 6, y - 2, 13, 2, G2); rect(x - 1, y - 9, 3, 2, W_); break;
+    case 'hat_party':
+      for (let k = 0; k < 9; k++) rect(x - 4 + Math.round(k / 2), y - 5 - k, 9 - k, 1, k % 3 === 1 ? G2 : W_);
+      rect(x - 1, y - 16, 3, 2, W_); break;
+    case 'hat_cowboy': rect(x - 9, y - 5, 19, 2, W_); rect(x - 4, y - 11, 9, 6, W_); rect(x - 4, y - 7, 9, 1, G1); px(x, y - 11, null); break;
+    case 'hat_tophat': rect(x - 7, y - 5, 15, 2, W_); rect(x - 4, y - 15, 9, 10, W_); rect(x - 4, y - 8, 9, 2, G1); break;
+    case 'hat_horns': rect(x - 5, y - 7, 2, 3, G1); rect(x - 6, y - 9, 2, 2, G1); rect(x + 3, y - 7, 2, 3, G1); rect(x + 4, y - 9, 2, 2, G1); break;
+    case 'hat_crown':
+      rect(x - 5, y - 8, 11, 3, W_); rect(x - 5, y - 10, 2, 2, W_); rect(x - 1, y - 11, 2, 3, W_); rect(x + 4, y - 10, 2, 2, W_);
+      px(x, y - 7, G1); px(x - 3, y - 7, G2); px(x + 3, y - 7, G2); break;
+    case 'hat_halo': rect(x - 3, y - 11, 7, 1, W_); rect(x - 4, y - 10, 9, 1, W_); rect(x - 3, y - 9, 7, 1, W_); rect(x - 2, y - 10, 5, 1, G3); break;
+    case 'hat_viking':
+      disc(x, y - 1, 6, W_, (a, b) => b <= y - 2); rect(x - 6, y - 3, 13, 1, G2);
+      rect(x - 8, y - 5, 2, 2, W_); rect(x - 9, y - 8, 2, 3, W_); rect(x + 7, y - 5, 2, 2, W_); rect(x + 8, y - 8, 2, 3, W_); break;
+  }
+}
+
+function renderGrid(f, p, o = {}) {
   const c = f.c, gx = GX, gy = GY, hy = p.hy;
   const hip = [gx + (p.hx || 0), gy - hy], lean = p.lean || 0;
   const top = [hip[0] + lean, hip[1] - 12];
@@ -125,22 +165,39 @@ function renderGrid(f, p) {
     seg(sh, e, 3, sleeve); seg(e, hand, 3, skin);
     rect(hand[0] - 2, hand[1] - 2, 4, 4, glove);
   };
+  const GUN = 'GUN';                 // gun pixels are marked, then painted with the gun skin at the end
   const gun = h => {
     if (f.gun === 'pistol') {
-      rect(h[0] - 1, h[1] - 3, 8, 2, '#6b7390'); rect(h[0] + 1, h[1] - 3, 5, 1, '#9aa3c0');
-      rect(h[0] - 1, h[1] - 1, 3, 3, '#3a3f4f');
+      rect(h[0] - 1, h[1] - 3, 8, 2, GUN); rect(h[0] - 1, h[1] - 1, 3, 3, GUN);
     } else if (f.gun === 'sniper') {
-      rect(h[0] - 8, h[1] - 3, 26, 2, '#6b7390'); rect(h[0] - 6, h[1] - 3, 22, 1, '#9aa3c0');
-      rect(h[0], h[1] - 6, 8, 2, '#3a3f4f'); px(h[0] + 7, h[1] - 6, '#7fd8ff');
-      rect(h[0] - 12, h[1] - 2, 6, 3, '#4a3a5a');
+      rect(h[0] - 8, h[1] - 3, 26, 2, GUN); rect(h[0], h[1] - 6, 8, 2, GUN); rect(h[0] - 12, h[1] - 2, 6, 3, GUN);
     } else if (f.gun === 'smg') {
-      rect(h[0] - 2, h[1] - 3, 11, 3, '#3a3f4f'); rect(h[0], h[1] - 3, 8, 1, '#6b7390');
-      rect(h[0] + 3, h[1], 2, 4, '#2a2a35');
+      rect(h[0] - 2, h[1] - 3, 11, 3, GUN); rect(h[0] + 3, h[1], 2, 4, GUN);
     } else {
-      rect(h[0] - 7, h[1] - 3, 19, 2, '#6b7390'); rect(h[0] - 5, h[1] - 3, 15, 1, '#9aa3c0');
-      rect(h[0] - 10, h[1] - 2, 6, 3, '#7a4a2a'); rect(h[0] + 4, h[1] - 1, 5, 2, '#9a6038');
+      rect(h[0] - 7, h[1] - 3, 19, 2, GUN); rect(h[0] - 10, h[1] - 2, 6, 3, GUN); rect(h[0] + 4, h[1] - 1, 5, 2, GUN);
     }
   };
+  // the SHARD cloak (a nod to SHARD): a cape from the shoulders, covered in little crystals, with a jagged crystal hem
+  const cape = o.cloak ? layer(() => {
+    // it ripples (wave = 0..3, which moment of the ripple) and streams out further when you move (flare)
+    const wave = o.wave || 0, flare = o.flare || 0;
+    const y0 = top[1] + 1, y1 = Math.min(gy - 5, hip[1] + 13) - flare * 3;
+    for (let y = y0; y <= y1; y++) {
+      const t = (y - y0) / (y1 - y0), ripple = Math.sin(t * Math.PI * 2 - wave * Math.PI / 2) * t * (1.2 + flare);
+      const xa = Math.round(top[0] - 5 - t * (14 + flare * 5) - (lean < 0 ? -lean : 0) + ripple), xb = Math.round(top[0] + 1 - t * (5 + flare * 2) + ripple * .5);
+      for (let x = xa; x <= xb; x++) {
+        const fromBottom = y1 - y, k = (x - xa + wave) % 4;
+        if ((fromBottom === 0 && k >= 2) || (fromBottom === 1 && k === 3)) continue;     // the shard-shaped hem
+        px(x, y, '#ffffff');
+      }
+    }
+    const shard = (cx, cy) => { px(cx, cy - 1, G2); px(cx - 1, cy, G2); px(cx, cy, G3); px(cx + 1, cy, G2); px(cx, cy + 1, G2); };
+    const mx = top[0] - 8, my = y0;
+    shard(mx - 1, my + 6); shard(mx - 5, my + 14); shard(mx - 11, my + 20); shard(mx - 2, my + 21);
+    // the big crystal emblem, out where it shows
+    rect(mx - 6, my + 8, 1, 8, G1); rect(mx - 7, my + 9, 3, 6, G1); px(mx - 6, my + 10, G4); px(mx - 6, my + 11, G4);
+  }) : null;
+  if (o.cloakOnly) return cape;                          // just the cloak, for the shop and locker pictures
   const back = layer(() => {
     leg(bf, shade(c.pants, .68), shade(c.shoe, .7));
     arm(bs, bh, shade(c.sleeve, .7), shade(c.skin, .76), shade(c.glove, .72));
@@ -156,14 +213,16 @@ function renderGrid(f, p) {
     rect(top[0] - 1, top[1] - 2, 3, 3, c.skin);
     disc(hc[0], hc[1], 5, c.skin);
     rect(hc[0] + 3, hc[1] - 1, 1, 2, OUT);
+    if (o.hat) drawHat(o.hat, hc);
     leg(ff, c.pants, c.shoe);
   });
   const front = layer(() => {
     if (p.gun) gun(fh);
     arm(fs, fh, c.sleeve, c.skin, c.glove);
   });
-  const out = back.slice();
-  for (let i = 0; i < out.length; i++) { if (body[i]) out[i] = body[i]; if (front[i]) out[i] = front[i]; }
+  const out = cape ? cape.slice() : back.slice();
+  for (let i = 0; i < out.length; i++) { if (cape && back[i]) out[i] = back[i]; if (body[i]) out[i] = body[i]; if (front[i]) out[i] = front[i]; }
+  for (let i = 0; i < out.length; i++) if (out[i] === GUN) out[i] = skinPixel(o.skin, i % SZ, (i / SZ) | 0);
   return out;
 }
 
@@ -214,7 +273,7 @@ function toCanvas(grid, flash, fill) {
     const col = grid[i];
     if (!col) continue;
     // fighters are plain white inside their black outlines; a hit flashes them solid black
-    x.fillStyle = col === OUT ? OUT : flash ? OUT : fill;
+    x.fillStyle = col === OUT ? OUT : flash ? OUT : KEEP.has(col) ? col : fill;
     x.fillRect(i % SZ, (i / SZ) | 0, 1, 1);
   }
   return cv;
@@ -234,18 +293,21 @@ function lieDown(g) {
   }
   return o;
 }
-// every fighter in white, plus a light grey second outfit for mirror matches
-const SPR = {};
-for (const k in FIGHTERS) {
-  const f = FIGHTERS[k], ps = poses(f);
-  for (const [name, fill] of [[k, '#ffffff'], [k + '_alt', '#b8b8b8']]) {
-    SPR[name] = { img: {}, flash: {} };
-    for (const n in ps) {
-      const g = n === 'lie' ? lieDown(renderGrid(f, ps[n])) : renderGrid(f, ps[n]);
-      SPR[name].img[n] = toCanvas(g, false, fill);
-      SPR[name].flash[n] = toCanvas(g, true, fill);
-    }
+// frames are drawn the first time they're needed and kept: one per fighter, pose, outfit (white, or
+// light grey for the second player in a mirror match), hat and gun skin
+const FRAMES = new Map(), POSES = {};
+function getFrame(key, name, o = {}) {
+  const id = key + '|' + name + '|' + (o.alt ? 1 : 0) + (o.flash ? 1 : 0) + '|' + (o.hat || '') + '|' + (o.skin || '') + '|' + (o.cloak || '') + (o.cloakOnly ? '|only' : '')
+    + (o.cloak ? '|' + (o.wave || 0) + (o.flare || 0) : '');
+  let cv = FRAMES.get(id);
+  if (!cv) {
+    const f = FIGHTERS[key], ps = POSES[key] || (POSES[key] = poses(f));
+    let g = renderGrid(f, ps[name], o);
+    if (name === 'lie') g = lieDown(g);
+    cv = toCanvas(g, o.flash, o.alt ? '#b8b8b8' : '#ffffff');
+    FRAMES.set(id, cv);
   }
+  return cv;
 }
 
 // ---------------------------------------------------------------- the stage: plain white, with a line to stand on
@@ -412,6 +474,32 @@ function readInput(p) {
   p.held = i; p.in = i; p.pr = pr;
 }
 let enterHeld = false, escHeld = false;
+// keys pressed this very frame (worked out once a frame in step)
+const TAPS = {}, KEYPREV = {};
+const tapped = (...codes) => codes.some(c => TAPS[c]);
+
+// ---------------------------------------------------------------- the mouse: hover to pick, click to use (menus only)
+// Each frame the screens register the boxes you can click (hit); a click runs the topmost one under the mouse.
+let HITS = [], hoverId = '';
+function hit(id, x, y, w, h, act, hover) { HITS.push({ id, x, y, w, h, act, hover, mode: game.mode + '/' + shop.tab }); }
+function hitAt(e) {
+  const r = screen.getBoundingClientRect(), mx = (e.clientX - r.left) / r.width * W, my = (e.clientY - r.top) / r.height * H;
+  const now = game.mode + '/' + shop.tab;               // ignore buttons left over from a screen that just changed
+  for (let i = HITS.length - 1; i >= 0; i--) { const h = HITS[i]; if (h.mode === now && mx >= h.x && my >= h.y && mx < h.x + h.w && my < h.y + h.h) return h; }
+  return null;
+}
+screen.addEventListener('mousemove', e => {
+  const h = hitAt(e);
+  screen.style.cursor = h ? 'pointer' : 'default';
+  if (h && h.hover && h.id !== hoverId) h.hover();
+  hoverId = h ? h.id : '';
+});
+screen.addEventListener('mousedown', e => {
+  if (e.button !== 0 || chat.typing) return;
+  audio();
+  const h = hitAt(e);
+  if (h) { if (h.hover) h.hover(); h.act(); }
+});
 
 // ---------------------------------------------------------------- online: one computer hosts the fight, the other joins with a code
 // The host runs the whole game and sends a snapshot every frame; the guest sends its keys and draws what it's sent.
@@ -429,11 +517,12 @@ const PARENT = { play: 'menu', coop: 'play', difficulty: 'play', ranked: 'play',
 const menu = { i: 0, msg: '', msgT: 0 };
 
 // settings, remembered on this computer
-const settings = { sound: true, shake: true };
+const settings = { sound: true, shake: true, filter: true, hearVoice: true };
 try { Object.assign(settings, JSON.parse(localStorage.getItem('trigger-settings') || '{}')); } catch (e) {}
 function saveSettings() { try { localStorage.setItem('trigger-settings', JSON.stringify(settings)); } catch (e) {} }
 function menuList(mode) {
-  if (mode === 'settings') return ['SOUND: ' + (settings.sound ? 'ON' : 'OFF'), 'SCREEN SHAKE: ' + (settings.shake ? 'ON' : 'OFF'), 'MIC: ' + micName(), 'CONTROLS', 'BACK'];
+  if (mode === 'settings') return ['SOUND: ' + (settings.sound ? 'ON' : 'OFF'), 'SCREEN SHAKE: ' + (settings.shake ? 'ON' : 'OFF'),
+    'CHAT FILTER: ' + (settings.filter ? 'ON' : 'OFF'), 'HEAR VOICE CHAT: ' + (settings.hearVoice ? 'ON' : 'OFF'), 'MIC: ' + micName(), 'CONTROLS', 'BACK'];
   return MENUS[mode];
 }
 
@@ -494,12 +583,13 @@ function joinGame() {
 }
 function linkUp(c) {
   net.conn = c;
-  c.on('open', () => { net.status = 'CONNECTED'; if (net.role === 'host') openSelect(); });
+  c.on('open', () => { net.status = 'CONNECTED'; sendCos(); if (net.role === 'host') openSelect(); });
   c.on('data', d => {
     if (net.role === 'host' && d.t === 'i') net.remote = d.i;
     if (net.role === 'guest' && d.t === 's') net.snap = d;
-    if (d.t === 'c' && !net.ranked) chatLine('FRIEND', d.m);
+    if (d.t === 'c' && !voice.muted) chatLine(net.ranked ? 'THEM' : 'FRIEND', settings.filter ? censor(d.m) : d.m);   // your filter setting decides what you see
     if (d.t === 'q' && net.role === 'host') say(P2, d.n);
+    if (d.t === 'e') { net.otherCos = cleanCos(d.cos); if (net.role === 'host' && P2) P2.cos = net.otherCos; }   // what the other player is wearing
   });
   c.on('close', () => {
     // in ranked, walking out of a match you haven't finished counts as a loss for them
@@ -511,6 +601,7 @@ function linkUp(c) {
     call.answer();
     call.on('stream', s => {
       voice.speaker.srcObject = s;
+      applyVolume();
       // browsers can refuse to play sound before you've pressed something: if so, try again on your next key press
       voice.speaker.play().then(() => { voice.blocked = false; }).catch(() => { voice.blocked = true; });
     });
@@ -524,6 +615,19 @@ const voice = { stream: null, on: false, asking: false, speaker: new Audio() };
 function chatLine(who, m) {
   chat.lines.push({ who, m: String(m).toUpperCase().slice(0, 40), life: 420 });
   if (chat.lines.length > 4) chat.lines.shift();
+}
+// you hear the other player unless you've muted them (M) or turned off HEAR VOICE CHAT in settings
+function applyVolume() { voice.speaker.muted = !!voice.muted || !settings.hearVoice; }
+// rude words become stars in messages you get, if your CHAT FILTER setting is on (it starts on)
+const RUDE = ['FUCK', 'FUK', 'SHIT', 'BITCH', 'CUNT', 'DICK', 'COCK', 'PUSSY', 'PENIS', 'VAGINA', 'NIGG', 'NIGA', 'FAG', 'RAPE',
+  'PORN', 'SEX', 'NAZI', 'HITLER', 'KKK', 'SLUT', 'WHORE', 'ASSHOLE', 'RETARD', 'WANK', 'TWAT', 'BOOB', 'KYS'];
+function censor(m) {
+  let s = String(m).toUpperCase();
+  for (const w of RUDE) s = s.split(w).join('*'.repeat(w.length));
+  // spelled out with gaps or numbers (F U C K, SH1T)? then the whole message goes
+  const squashed = s.replace(/[^A-Z0-9]/g, '').replace(/0/g, 'O').replace(/1/g, 'I').replace(/3/g, 'E').replace(/4/g, 'A').replace(/5/g, 'S');
+  if (RUDE.some(w => w.length >= 4 && squashed.includes(w))) s = s.replace(/[^ ]/g, '*');     // (short words would catch innocent ones, like "THIS EXIT")
+  return s;
 }
 function sendChat() {
   const m = chat.draft.trim();
@@ -565,7 +669,13 @@ async function switchMic() {
 const fighting = () => ['intro', 'fight', 'ko', 'over'].includes(game.mode);
 addEventListener('keydown', e => {
   if (voice.blocked) voice.speaker.play().then(() => { voice.blocked = false; }).catch(() => {});
-  const friends = net.role && !net.ranked && net.conn && net.conn.open;
+  const friends = net.role && net.conn && net.conn.open;          // anyone you're playing online: friends or ranked
+  if (friends && e.code === 'KeyM' && !chat.typing) {            // mute (or unmute) the other player's voice and messages
+    voice.muted = !voice.muted;
+    applyVolume();
+    chatLine('GAME', voice.muted ? 'OTHER PLAYER MUTED - M TO UNMUTE' : 'OTHER PLAYER UNMUTED');
+    return;
+  }
   if (chat.typing) {
     e.preventDefault();
     if (e.key === 'Enter') sendChat();
@@ -586,7 +696,7 @@ addEventListener('keydown', e => {
 });
 function drawChat() {
   for (const l of chat.lines) if (l.life > 0) l.life--;
-  if (!net.role || net.ranked) return;
+  if (!net.role) return;
   let y = fighting() ? 40 : 150;
   for (const l of chat.lines) {
     if (l.life <= 0) continue;
@@ -594,7 +704,9 @@ function drawChat() {
     y += 8;
   }
   if (chat.typing) text('SAY: ' + chat.draft + (T % 30 < 15 ? '_' : ''), 8, 170, 1, '#ffffff');
-  else if (voice.speaker.srcObject) text(voice.blocked ? 'PRESS ANY KEY TO HEAR YOUR FRIEND' : 'FRIEND\'S MIC IS ON', 8, 170, 1, '#ffffff');
+  else if (voice.muted) text('OTHER PLAYER MUTED - M TO UNMUTE', 8, 170, 1, '#ffffff');
+  else if (!settings.hearVoice && voice.speaker.srcObject) text('VOICE CHAT IS OFF IN SETTINGS', 8, 170, 1, '#9a9a9a');
+  else if (voice.speaker.srcObject) text(voice.blocked ? 'PRESS ANY KEY TO HEAR THEM' : (net.ranked ? 'THEIR' : 'FRIEND\'S') + ' MIC IS ON - M TO MUTE', 8, 170, 1, '#ffffff');
   if (!chat.typing && game.mode !== 'lobby') {
     drawMic(304, 164, voice.stream ? (voice.on ? 'on' : 'muted') : 'off');
     text((fighting() && game.mode !== 'over' ? '' : 'T CHAT  ') + 'V', 298, 170, 1, '#9a9a9a', 'right');
@@ -633,8 +745,8 @@ function drawBubbles() {
   for (const p of [P1, P2]) {
     if (!p || !(p.bubbleT > 0)) continue;
     const w = p.bubble.length * 4 + 5, x = Math.round(p.x - w / 2), y = Math.round(p.y - 60), cx = Math.round(p.x);
-    ctx.fillStyle = OUT; ctx.fillRect(x - 2, y - 2, w + 4, 13); ctx.fillRect(cx - 3, y + 10, 6, 4);
-    ctx.fillStyle = '#ffffff'; ctx.fillRect(x, y, w, 9); ctx.fillRect(cx - 1, y + 9, 3, 3);
+    rbox(x - 2, y - 2, w + 4, 13, 3, OUT); ctx.fillStyle = OUT; ctx.fillRect(cx - 3, y + 10, 6, 4);
+    rbox(x, y, w, 9, 2, '#ffffff'); ctx.fillStyle = '#ffffff'; ctx.fillRect(cx - 1, y + 9, 3, 3);
     plain(p.bubble, x + 3, y + 2, OUT);
   }
 }
@@ -696,10 +808,11 @@ function leaveOnline(msg) {
   const wasRanked = net.ranked;
   try { if (net.peer) net.peer.destroy(); } catch (e) {}
   if (voice.stream) voice.stream.getTracks().forEach(t => t.stop());
-  Object.assign(voice, { stream: null, on: false, blocked: false, call: null });
+  Object.assign(voice, { stream: null, on: false, blocked: false, call: null, muted: false });
+  applyVolume();
   voice.speaker.srcObject = null;
   Object.assign(chat, { typing: false, draft: '', lines: [] });
-  Object.assign(net, { role: null, peer: null, conn: null, remote: {}, snap: null, sounds: [], ranked: false, names: null });
+  Object.assign(net, { role: null, peer: null, conn: null, remote: {}, snap: null, sounds: [], ranked: false, names: null, otherCos: null });
   game.cpu = null; game.searching = false;
   game.mode = wasRanked ? 'ranked' : 'title'; menu.i = 0; P1 = P2 = null;
   if (wasRanked) refreshMe();
@@ -726,7 +839,10 @@ function sendSnapshot() {
 function applySnapshot(s) {
   T = s.T; shakeAmt = settings.shake ? s.shake : 0; picks = s.picks; net.names = s.names;
   // a ranked match just ended: send in who won
-  if (net.ranked && s.game.mode === 'over' && game.mode !== 'over') reportResult(s.p1.wins >= 2 ? ranked.hostId : ranked.guestId);
+  if (s.game.mode === 'over' && game.mode !== 'over') {
+    if (net.ranked) reportResult(s.p1.wins >= 2 ? ranked.hostId : ranked.guestId);
+    else giveReward('coop', '', s.p2.wins >= 2);
+  }
   P1 = unpackPlayer(s.p1); P2 = unpackPlayer(s.p2);
   Object.assign(game, s.game, { winner: s.game.winner == null ? null : [P1, P2][s.game.winner] });
   s.sel.forEach((v, k) => Object.assign(sel[k], v));
@@ -745,7 +861,12 @@ function guestTick() {
 const SUPABASE_URL = 'https://illevdcnioftzfixznmk.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlsbGV2ZGNuaW9mdHpmaXh6bm1rIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI4ODEzNDMsImV4cCI6MjEwODQ1NzM0M30.69rD3FLXer6yI3_Kn7lZI9TebtmMhOzFOZp7SXZSo6A';
 const RANKS = [['BEGINNER', 0], ['AMATEUR', 100], ['INTERMEDIATE', 250], ['MEDALIST', 450], ['FIGHTER', 700], ['KILLER', 1000], ['DEMON', 1400]];
-const rankOf = pts => RANKS.filter(r => pts >= r[1]).pop()[0];
+const rankOf = pts => RANKS.filter(r => (pts || 0) >= r[1]).pop()[0];
+// fill in anything missing (for example before the database has the coins and shop columns)
+const normMe = d => d && Object.assign({}, d, {
+  coins: d.coins || 0, keys: d.keys || 0, xp: d.xp || 0, premium: !!d.premium, owned: d.owned || [], equipped: d.equipped || {},
+  stats: d.stats || {}, claimed: d.claimed || [], pass_claimed: d.pass_claimed || [],
+});
 const ranked = { db: null, me: null, status: '', board: null, match: null, hostId: null, guestId: null, result: '', searchT: 0, reported: false, lastQueue: 0 };
 async function openRanked() {
   game.mode = 'ranked'; menu.i = 0; ranked.result = '';
@@ -758,7 +879,7 @@ async function openRanked() {
     if (!s.session) { const { error } = await ranked.db.auth.signInAnonymously(); if (error) throw error; }
     const { data, error } = await ranked.db.rpc('ensure_player');      // your player, made the first time
     if (error) throw error;
-    ranked.me = data; ranked.status = '';
+    ranked.me = normMe(data); ranked.status = '';
   } catch (e) { ranked.status = 'COULD NOT REACH THE RANKED SERVER'; return; }
   if (!ranked.me.named) { game.mode = 'pickname'; ranked.typed = ''; ranked.nameErr = ''; }    // first time: pick a name
 }
@@ -768,8 +889,8 @@ async function saveName() {
   const { data, error } = await ranked.db.rpc('set_name', { new_name: ranked.typed });
   ranked.saving = false;
   if (error) { ranked.nameErr = (error.message || 'COULD NOT SAVE').toUpperCase(); return; }
-  ranked.me = data; ranked.nameErr = '';
-  goTo('ranked');
+  ranked.me = normMe(data); ranked.nameErr = '';
+  goTo(ranked.after || 'ranked');
 }
 addEventListener('keydown', e => {
   if (game.mode !== 'pickname') return;
@@ -783,7 +904,7 @@ addEventListener('keydown', e => {
 async function refreshMe() {
   if (!ranked.db || !ranked.me) return;
   const { data } = await ranked.db.from('players').select('*').eq('id', ranked.me.id).single();
-  if (data) ranked.me = data;
+  if (data) ranked.me = normMe(data);
 }
 function findMatch() {
   if (!ranked.me) return;
@@ -828,7 +949,7 @@ function beginRanked(c, role) {
   net.role = role;
   linkUp(c);
   ai.t = 0;
-  if (role === 'host') openSelect();
+  if (role === 'host') { sendCos(); openSelect(); }
   else { game.mode = 'lobby'; net.status = 'PLAYER FOUND!'; }
   sfx.bell();
 }
@@ -839,7 +960,7 @@ function stopSearch() {
 async function reportResult(winnerId) {
   if (ranked.reported || !ranked.match || !ranked.db) return;
   ranked.reported = true;
-  const before = ranked.me.points, played = ranked.me.wins + ranked.me.losses;
+  const before = ranked.me.points, played = ranked.me.wins + ranked.me.losses, coinsBefore = ranked.me.coins || 0;
   await ranked.db.rpc('report_result', { match_id: ranked.match, winner: winnerId });
   // the result counts once both players have sent in the same winner
   for (let k = 0; k < 8; k++) {
@@ -847,7 +968,8 @@ async function reportResult(winnerId) {
     await refreshMe();
     if (ranked.me.wins + ranked.me.losses !== played) {
       const d = ranked.me.points - before;
-      ranked.result = (d > 0 ? '+' + d + ' POINTS' : d < 0 ? d + ' POINTS' : 'NO POINTS LOST') + '  -  ' + rankOf(ranked.me.points);
+      const coins = (ranked.me.coins || 0) - coinsBefore;
+      ranked.result = (d > 0 ? '+' + d + ' POINTS' : d < 0 ? d + ' POINTS' : 'NO POINTS LOST') + (coins > 0 ? ' +' + coins + ' COINS +1 KEY' : '') + ' - ' + rankOf(ranked.me.points);
       return;
     }
   }
@@ -855,10 +977,425 @@ async function reportResult(winnerId) {
 }
 async function openBoard() {
   game.mode = 'board'; ranked.board = null;
-  const { data } = await ranked.db.from('players').select('name, points').order('points', { ascending: false }).limit(20);
+  const { data } = await ranked.db.from('players').select('name, points').eq('named', true).order('points', { ascending: false }).limit(20);
   ranked.board = data || [];
 }
 addEventListener('beforeunload', () => { if (game.searching && ranked.db) ranked.db.rpc('leave_queue').then(() => {}); });
+
+// ---------------------------------------------------------------- coins, the shop, the battle pass and achievements
+// Everything is saved in Supabase and every purchase or reward is checked there (supabase-setup.sql), so it can't be edited.
+const ITEMS = {
+  hat_cap: ['CAP', 'common', 40], hat_headband: ['HEADBAND', 'common', 40], hat_beanie: ['BEANIE', 'common', 60], hat_party: ['PARTY HAT', 'common', 60],
+  hat_cowboy: ['COWBOY HAT', 'rare', 120], hat_tophat: ['TOP HAT', 'rare', 120], hat_horns: ['HORNS', 'epic', 200], hat_crown: ['CROWN', 'epic', 300],
+  hat_halo: ['HALO', 'legendary', 400], hat_viking: ['VIKING', 'legendary', 0],
+  skin_stripes: ['STRIPES', 'common', 40], skin_dots: ['DOTS', 'common', 40], skin_checker: ['CHECKER', 'rare', 80], skin_camo: ['CAMO', 'rare', 80],
+  skin_zebra: ['ZEBRA', 'epic', 150], skin_chrome: ['CHROME', 'epic', 150], skin_shadow: ['SHADOW', 'legendary', 300], skin_tiger: ['TIGER', 'legendary', 0],
+  cloak_shard: ['SHARD CLOAK', 'legendary', 0],          // a nod to SHARD: the creator's own, never sold
+};
+const HATS = Object.keys(ITEMS).filter(k => k.startsWith('hat_')), SKINS = Object.keys(ITEMS).filter(k => k.startsWith('skin_'));
+// a crate costs coins; a mega crate costs keys, which only come from winning co-op and ranked
+const CRATES = [['crate', 'CRATE', 30, 'MOSTLY COMMON', 'coins'], ['mega', 'MEGA CRATE', 3, 'RARE OR BETTER', 'keys']];
+const PREMIUM_PRICE = 200;
+// the battle pass (the same lists are in supabase-setup.sql): cNN = coins, crate/mega = a free crate, or an item
+const PASS = {
+  free: ['c10', 'c10', 'hat_headband', 'c15', 'crate', 'c15', 'skin_dots', 'c20', 'c20', 'crate',
+         'c20', 'hat_party', 'c25', 'c25', 'crate', 'c25', 'skin_checker', 'c30', 'c30', 'mega'],
+  premium: ['c30', 'hat_beanie', 'c30', 'skin_stripes', 'mega', 'c40', 'hat_cowboy', 'c40', 'skin_camo', 'mega',
+            'c50', 'hat_tophat', 'c50', 'skin_zebra', 'mega', 'c60', 'hat_crown', 'skin_tiger', 'c80', 'hat_viking'],
+};
+const ACHIEVEMENTS = [
+  ['first_win', 'FIRST WIN', 'WIN A MATCH', 'wins', 1, 10],
+  ['bot_10', 'BOT BUSTER', 'BEAT THE BOT 10 TIMES', 'bot_wins', 10, 20],
+  ['hard_5', 'HARD MODE', 'BEAT A HARD BOT 5 TIMES', 'hard_wins', 5, 30],
+  ['coop_5', 'TEAM PLAYER', 'WIN 5 ONLINE CO-OP MATCHES', 'coop_wins', 5, 30],
+  ['ranked_1', 'RANKED UP', 'WIN A RANKED MATCH', 'ranked_wins', 1, 15],
+  ['amateur', 'AMATEUR', 'REACH AMATEUR RANK', 'points', 100, 30],
+  ['medalist', 'MEDALIST', 'REACH MEDALIST RANK', 'points', 450, 60],
+  ['demon', 'DEMON', 'REACH DEMON RANK', 'points', 1400, 200],
+  ['vet_50', 'VETERAN', 'PLAY 50 MATCHES', 'matches', 50, 50],
+  ['collect_10', 'COLLECTOR', 'OWN 10 ITEMS', 'owned', 10, 40],
+  ['crates_10', 'UNBOXER', 'OPEN 10 CRATES', 'crates', 10, 30],
+];
+const RARITY_LOOK = { common: '#ffffff', rare: '#c8c8c8', epic: '#a0a0a0', legendary: '#646464' };
+const SIDEBAR = ['ACCOUNT', 'SHOP'];
+const shop = { tab: 0, i: 0, row: 0, msg: '', msgT: 0, busy: false };
+const crateAnim = { t: 0, crate: '', result: null, err: '' };
+
+function progress(stat) {
+  const me = ranked.me;
+  if (!me) return 0;
+  if (stat === 'points') return me.points;
+  if (stat === 'owned') return (me.owned || []).length;
+  return (me.stats && me.stats[stat]) || 0;
+}
+const owns = id => !!(ranked.me && (ranked.me.owned || []).includes(id));
+const slotOf = id => id.split('_')[0];                    // hat, skin or cloak
+const equippedAs = id => !!(ranked.me && ranked.me.equipped && ranked.me.equipped[slotOf(id)] === id);
+function myCos() { const e = (ranked.me && ranked.me.equipped) || {}; return { hat: e.hat || '', skin: e.skin || '', cloak: e.cloak || '' }; }
+function cosFor(id) {
+  if (net.role === 'guest') return id === 1 ? myCos() : (net.otherCos || {});
+  if (net.role === 'host') return id === 0 ? myCos() : (net.otherCos || {});
+  if (game.cpu) return id === 0 ? myCos() : (net.botCos || {});
+  return id === 0 ? myCos() : {};
+}
+const cleanCos = c => ({ hat: ITEMS[c && c.hat] ? c.hat : '', skin: ITEMS[c && c.skin] ? c.skin : '', cloak: ITEMS[c && c.cloak] ? c.cloak : '' });
+function sendCos() { if (net.conn && net.conn.open) net.conn.send({ t: 'e', cos: myCos() }); }
+
+// sign in quietly when the game opens, so wins against the bot count too
+async function signInQuiet() {
+  if (!SUPABASE_URL || !SUPABASE_KEY || !window.supabase || ranked.me) return;
+  try {
+    if (!ranked.db) ranked.db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    const { data: s } = await ranked.db.auth.getSession();
+    if (!s.session) { const { error } = await ranked.db.auth.signInAnonymously(); if (error) return; }
+    const { data } = await ranked.db.rpc('ensure_player');
+    if (data) ranked.me = normMe(data);
+  } catch (e) {}
+}
+signInQuiet();
+// Account, Shop and Ranked all need a name; the first time, pick one, then carry on to where you were going
+async function needProfile(next) {
+  ranked.after = next;
+  await openRanked();
+  if (game.mode === 'ranked' && ranked.me) { game.mode = next; shop.tab = 0; shop.i = 0; shop.row = 0; menu.i = 0; }
+}
+async function giveReward(mode, level, won) {
+  game.reward = '';
+  if (!ranked.db) await signInQuiet();
+  if (!ranked.db || !ranked.me) return;
+  const { data } = await ranked.db.rpc('award', { mode, level: level || '', won });
+  if (data) game.reward = '+' + data.coins + ' COINS   ' + (data.keys ? '+' + data.keys + ' KEY   ' : '') + '+' + data.xp + ' DEMON ROAD XP';
+  refreshMe();
+}
+async function shopCall(fn, args, after) {
+  if (shop.busy) return;
+  shop.busy = true;
+  const { data, error } = await ranked.db.rpc(fn, args);
+  shop.busy = false;
+  if (error) { shop.msg = (error.message || 'SOMETHING WENT WRONG').toUpperCase(); shop.msgT = 150; sfx.empty(); return; }
+  if (data && data.id) ranked.me = normMe(data); else await refreshMe();
+  if (after) after(data);
+}
+function openCrate(kind, viaPass) {
+  Object.assign(crateAnim, { t: 0, crate: kind, result: null, err: '' });
+  game.mode = 'crate';
+  if (viaPass) return;                     // a pass crate has already been rolled: claimTier fills in the result
+  ranked.db.rpc('open_crate', { crate: kind }).then(({ data, error }) => {
+    if (error) crateAnim.err = (error.message || 'COULD NOT OPEN').toUpperCase();
+    else crateAnim.result = data;
+    refreshMe();
+  });
+}
+function claimTier(tier, track) {
+  shopCall('claim_tier', { tier: tier + 1, track }, r => {
+    if (!r) return;
+    if (r.kind === 'crate') { openCrate(r.crate, true); crateAnim.result = r; }
+    else { shop.msg = r.kind === 'coins' ? '+' + r.amount + ' COINS' : 'GOT ' + ITEMS[r.item][0] + '!'; shop.msgT = 150; sfx.rack(); }
+  });
+}
+function rewardLabel(r) {
+  if (/^c\d+$/.test(r)) return r.slice(1) + ' COINS';
+  if (r === 'crate') return 'CRATE';
+  if (r === 'mega') return 'MEGA CRATE';
+  return ITEMS[r][0];
+}
+
+// input on the account, shop and crate screens: Q/E switch tabs, WASD or arrows move, Enter does it, Esc goes back
+function updateProfileScreens(escPressed, enterPressed) {
+  const left = tapped('KeyA', 'ArrowLeft'), right = tapped('KeyD', 'ArrowRight'), up = tapped('KeyW', 'ArrowUp'), down = tapped('KeyS', 'ArrowDown');
+  const tabL = tapped('KeyQ'), tabR = tapped('KeyE');
+  if (game.mode === 'crate') {
+    crateAnim.t++;
+    if ((enterPressed || escPressed) && (crateAnim.err || (crateAnim.result && crateAnim.t > 80))) { game.mode = 'shop'; shop.tab = shop.tab || 3; }
+    return;
+  }
+  if (escPressed) { goTo('menu', 0); menu.col = 1; menu.si = game.mode === 'shop' ? 1 : 0; return; }
+  const tabs = game.mode === 'shop' ? 4 : 2;
+  if (tabL || tabR) { shop.tab = (shop.tab + (tabR ? 1 : tabs - 1)) % tabs; shop.i = 0; shop.row = 0; sfx.click(); return; }
+  if (!ranked.me) return;
+  if (game.mode === 'account') {
+    if (shop.tab === 0) {                                // achievements
+      if (up) shop.i = Math.max(0, shop.i - 1);
+      if (down) shop.i = Math.min(ACHIEVEMENTS.length - 1, shop.i + 1);
+      const a = ACHIEVEMENTS[shop.i];
+      if (enterPressed && !ranked.me.claimed.includes(a[0]) && progress(a[3]) >= a[4])
+        shopCall('claim_achievement', { aid: a[0] }, () => { shop.msg = '+' + a[5] + ' COINS'; shop.msgT = 150; sfx.rack(); });
+    } else {                                             // locker: what you own
+      const list = (ranked.me.owned || []).filter(id => ITEMS[id]);
+      gridMove(list.length, 6, left, right, up, down);
+      const id = list[shop.i];
+      if (enterPressed && id) equip(id);
+    }
+    return;
+  }
+  // shop
+  if (shop.tab === 0) {                                  // battle pass
+    if (left) shop.i = Math.max(0, shop.i - 1);
+    if (right) shop.i = Math.min(19, shop.i + 1);
+    if (up || down) shop.row ^= 1;
+    if (enterPressed) {
+      const track = shop.row ? 'premium' : 'free';
+      if (track === 'premium' && !ranked.me.premium) shopCall('buy_premium', {}, () => { shop.msg = 'PREMIUM DEMON ROAD UNLOCKED!'; shop.msgT = 150; sfx.rack(); });
+      else claimTier(shop.i, track);
+    }
+  } else if (shop.tab === 3) {                           // crates
+    if (left || right) shop.i ^= 1;
+    if (enterPressed) {
+      const c = CRATES[shop.i];
+      if (ranked.me[c[4]] < c[2]) { shop.msg = c[4] === 'keys' ? 'YOU NEED 3 KEYS - WIN CO-OP OR RANKED' : 'NOT ENOUGH COINS'; shop.msgT = 150; sfx.empty(); }
+      else openCrate(c[0]);
+    }
+  } else {                                               // hats or skins
+    const list = shop.tab === 1 ? HATS : SKINS;
+    gridMove(list.length, 5, left, right, up, down);
+    const id = list[shop.i];
+    if (enterPressed && id) {
+      if (owns(id)) equip(id);
+      else if (!ITEMS[id][2]) { shop.msg = 'DEMON ROAD ONLY'; shop.msgT = 120; }
+      else shopCall('buy', { item: id }, () => { shop.msg = 'BOUGHT ' + ITEMS[id][0] + '!'; shop.msgT = 150; sfx.rack(); });
+    }
+  }
+}
+const profileAct = () => updateProfileScreens(false, true);      // a click does what Enter does
+function gridMove(n, cols, left, right, up, down) {
+  if (!n) { shop.i = 0; return; }
+  if (left) shop.i = Math.max(0, shop.i - 1);
+  if (right) shop.i = Math.min(n - 1, shop.i + 1);
+  if (up) shop.i = Math.max(0, shop.i - cols);
+  if (down) shop.i = Math.min(n - 1, shop.i + cols);
+}
+function equip(id) {
+  const slot = slotOf(id);
+  const off = equippedAs(id);                            // Enter on what you're wearing takes it off
+  shopCall('equip', { slot, item: off ? '' : id }, () => { shop.msg = off ? 'TAKEN OFF' : 'EQUIPPED!'; shop.msgT = 100; sfx.click(); });
+}
+
+// ---- drawing the account, shop and crate screens
+function drawCoin(x, y) {
+  ctx.fillStyle = OUT; ctx.fillRect(x + 1, y, 5, 7); ctx.fillRect(x, y + 1, 7, 5);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(x + 2, y + 1, 3, 5); ctx.fillRect(x + 1, y + 2, 5, 3);
+  ctx.fillStyle = G2; ctx.fillRect(x + 3, y + 2, 1, 3);
+}
+function drawKey(x, y) {                                // a little pixel key
+  ctx.fillStyle = OUT; ctx.fillRect(x, y, 5, 5); ctx.fillRect(x + 4, y + 1, 6, 3); ctx.fillRect(x + 7, y + 3, 3, 3);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(x + 1, y + 1, 3, 3); ctx.fillRect(x + 5, y + 2, 4, 1); ctx.fillRect(x + 8, y + 3, 1, 2);
+  ctx.fillStyle = OUT; ctx.fillRect(x + 2, y + 2, 1, 1);
+}
+function drawCoins(x, y) {
+  // your coins and keys, in the top corner
+  if (!ranked.me) return;
+  const s = String(ranked.me.coins), k = String(ranked.me.keys);
+  text(s, x, y, 1, '#ffffff', 'right');
+  drawCoin(x - s.length * 4 - 9, y - 1);
+  const kx = x - s.length * 4 - 16;
+  text(k, kx, y, 1, '#ffffff', 'right');
+  drawKey(kx - k.length * 4 - 13, y);
+}
+// a big outlined gun, painted with a skin, for the shop
+const GUN_ICONS = new Map();
+function gunIcon(skin, small) {
+  const key = skin + (small ? '-small' : '');
+  if (GUN_ICONS.has(key)) return GUN_ICONS.get(key);
+  const g = layer(() => {
+    if (small) { rect(5, 24, 21, 4, 'GUN'); rect(2, 25, 6, 6, 'GUN'); rect(12, 20, 8, 3, 'GUN'); rect(9, 28, 4, 5, 'GUN'); }
+    else { rect(6, 22, 33, 5, 'GUN'); rect(2, 24, 8, 8, 'GUN'); rect(18, 16, 11, 4, 'GUN'); rect(22, 20, 3, 2, 'GUN'); rect(13, 27, 5, 7, 'GUN'); }
+  });
+  for (let i = 0; i < g.length; i++) if (g[i] === 'GUN') g[i] = skinPixel(skin, i % SZ, (i / SZ) | 0);
+  const cv = toCanvas(g, false, '#ffffff');
+  GUN_ICONS.set(key, cv);
+  return cv;
+}
+function drawItem(id, x, y, w, h) {
+  // a little picture of the item: a head with the hat on, or a gun with the skin (a smaller gun for small boxes)
+  if (id.startsWith('hat_')) ctx.drawImage(getFrame('rex', 'idle0', { hat: id }), GX - 12, 0, 26, 26, x + (w - 26) / 2, y + (h - 26) / 2, 26, 26);
+  else if (id.startsWith('cloak_')) ctx.drawImage(getFrame('rex', 'idle0', { cloak: id }), GX - 17, 16, 28, 28, Math.round(x + (w - 28) / 2), Math.round(y + (h - 28) / 2), 28, 28);
+  else if (w < 44) ctx.drawImage(gunIcon(id, true), 0, 18, 30, 17, Math.round(x + (w - 30) / 2), Math.round(y + (h - 17) / 2), 30, 17);
+  else ctx.drawImage(gunIcon(id), 0, 13, 42, 24, Math.round(x + (w - 42) / 2), Math.round(y + (h - 24) / 2), 42, 24);
+}
+// a filled rectangle with rounded pixel corners (r = how round)
+const CORNERS = { 1: [1], 2: [1], 3: [2, 1], 4: [3, 1, 1], 5: [3, 2, 1, 1] };
+function rbox(x, y, w, h, r, col) {
+  const ins = CORNERS[r] || [];
+  ctx.fillStyle = col;
+  for (let j = 0; j < h; j++) {
+    const d = Math.min(j, h - 1 - j), i = d < ins.length ? ins[d] : 0;
+    ctx.fillRect(x + i, y + j, w - i * 2, 1);
+  }
+}
+function box(x, y, w, h, on, fill = '#ffffff') {
+  if (on && T % 30 < 20) rbox(x - 4, y - 4, w + 8, h + 8, 5, G3);        // the selected one glows
+  rbox(x - 2, y - 2, w + 4, h + 4, 4, on ? OUT : G2);
+  rbox(x, y, w, h, 3, fill);
+}
+function drawTabs(names) {
+  let x = 160 - names.reduce((s, n) => s + n.length * 4 + 14, 0) / 2;
+  names.forEach((n, k) => {
+    const w = n.length * 4 + 6;
+    box(x, 22, w, 9, k === shop.tab, k === shop.tab ? '#ffffff' : '#d8d8d8');
+    text(n, x + 3, 24, 1, k === shop.tab ? '#ffffff' : '#9a9a9a');
+    hit('tab' + k, x - 2, 20, w + 4, 13, () => { if (shop.tab !== k) { shop.tab = k; shop.i = 0; shop.row = 0; sfx.click(); } });
+    x += w + 8;
+  });
+}
+function drawProfileScreens() {
+  ctx.drawImage(BG, 0, 0);
+  if (game.mode === 'crate') return drawCrate();
+  text(game.mode === 'shop' ? 'SHOP' : 'ACCOUNT', 8, 6, 2, '#ffffff');
+  drawCoins(312, 8);
+  if (!ranked.me) { text(ranked.status || 'SIGNING IN...', 160, 80, 1, '#ffffff', 'center'); return; }
+  const me = ranked.me;
+  if (game.mode === 'account') {
+    drawTabs(['ACHIEVEMENTS', 'LOCKER']);
+    // you, with what you're wearing
+    const show = { key: 'rex', skin: 'rex', x: 286, y: 122, face: -1, flash: 0, state: 'idle', cos: myCos() };
+    drawFighter(show, 'shoot0');
+    text(me.name, 286, 126, 1, '#ffffff', 'center');
+    text(rankOf(me.points), 286, 135, 1, '#c8c8c8', 'center');
+    if (shop.tab === 0) {
+      const first = Math.max(0, Math.min(shop.i - 2, ACHIEVEMENTS.length - 6));
+      ACHIEVEMENTS.slice(first, first + 6).forEach((a, k) => {
+        const idx = first + k, y = 40 + k * 18, got = me.claimed.includes(a[0]), have = Math.min(progress(a[3]), a[4]), done = have >= a[4];
+        box(40, y, 176, 14, idx === shop.i, got ? '#e0e0e0' : '#ffffff');
+        hit('ach' + idx, 38, y - 2, 180, 18, profileAct, () => { shop.i = idx; });
+        text(a[1], 44, y + 1, 1, '#ffffff');
+        plain(a[2], 44, y + 8, G2);
+        text(got ? 'DONE' : done ? 'CLAIM +' + a[5] : have + '/' + a[4] + '  +' + a[5], 212, y + 4, 1, done && !got ? '#ffffff' : '#9a9a9a', 'right');
+      });
+    } else {
+      const list = (me.owned || []).filter(id => ITEMS[id]);
+      if (!list.length) text('NOTHING YET - WIN COINS AND VISIT THE SHOP', 128, 80, 1, '#ffffff', 'center');
+      // three rows at a time: the grid scrolls to keep the one you're on in view
+      const firstRow = Math.max(0, Math.min(Math.floor(shop.i / 6) - 1, Math.ceil(list.length / 6) - 3));
+      if (firstRow > 0) plain('MORE ABOVE', 98, 36, G2);
+      if ((firstRow + 3) * 6 < list.length) plain('MORE BELOW', 98, 143, G2);
+      list.forEach((id, k) => {
+        const row = Math.floor(k / 6) - firstRow;
+        if (row < 0 || row > 2) return;
+        const x = 10 + (k % 6) * 40, y = 42 + row * 35;
+        box(x, y, 34, 30, k === shop.i, equippedAs(id) ? '#e0e0e0' : '#ffffff');
+        hit('lock' + k, x - 2, y - 2, 38, 34, profileAct, () => { shop.i = k; });
+        drawItem(id, x, y, 34, 30);
+        if (equippedAs(id)) plain('ON', x + 2, y + 2, OUT);
+      });
+      const id = list[shop.i];
+      if (id) text(ITEMS[id][0] + ' - ' + ITEMS[id][1].toUpperCase() + ' - ENTER TO ' + (equippedAs(id) ? 'TAKE OFF' : 'WEAR'), 128, 150, 1, '#ffffff', 'center');
+    }
+  } else {
+    drawTabs(['DEMON ROAD', 'HATS', 'SKINS', 'CRATES']);
+    if (shop.tab === 0) {
+      const level = Math.min(20, Math.floor(me.xp / 100));
+      text('DEMON ROAD - TIER ' + level + ' / 20', 8, 40, 1, '#ffffff');
+      ctx.fillStyle = OUT; ctx.fillRect(160, 40, 152, 6); ctx.fillStyle = '#d8d8d8'; ctx.fillRect(161, 41, 150, 4);
+      ctx.fillStyle = G2; ctx.fillRect(161, 41, Math.round(150 * (level >= 20 ? 1 : (me.xp % 100) / 100)), 4);
+      const first = Math.max(0, Math.min(shop.i - 2, 15));
+      text('FREE', 8, 70, 1, '#ffffff'); text('PREMIUM', 8, 112, 1, me.premium ? '#ffffff' : '#9a9a9a');
+      for (let k = 0; k < 5; k++) {
+        const t = first + k, x = 48 + k * 54;
+        text(String(t + 1), x + 22, 52, 1, t < level ? '#ffffff' : '#9a9a9a', 'center');
+        ['free', 'premium'].forEach((track, row) => {
+          const y = 60 + row * 42, r = PASS[track][t], got = me.pass_claimed.includes(track + (t + 1));
+          box(x, y, 44, 34, t === shop.i && row === shop.row, got ? '#e0e0e0' : t < level && (row === 0 || me.premium) ? '#ffffff' : '#d8d8d8');
+          hit('pass' + t + row, x - 2, y - 2, 48, 38, profileAct, () => { shop.i = t; shop.row = row; });
+          if (ITEMS[r]) drawItem(r, x, y - 4, 44, 34);
+          else if (r === 'crate' || r === 'mega') drawCrateIcon(x + 22, y + 13, r === 'mega', 0, 1, true);
+          else { drawCoin(x + 19, y + 8); }
+          plain(rewardLabel(r).slice(0, 10), x + 2, y + 27, OUT);
+          if (got) plain('GOT', x + 31, y + 2, OUT);
+        });
+      }
+      const track = shop.row ? 'premium' : 'free', got = me.pass_claimed.includes(track + (shop.i + 1));
+      const hint = track === 'premium' && !me.premium ? 'ENTER - GET PREMIUM FOR ' + PREMIUM_PRICE + ' COINS'
+        : got ? 'ALREADY CLAIMED' : shop.i < level ? 'ENTER TO CLAIM ' + rewardLabel(PASS[track][shop.i]) : 'REACH TIER ' + (shop.i + 1) + ' TO CLAIM - WIN MATCHES FOR XP';
+      text(hint, 160, 150, 1, '#ffffff', 'center');
+    } else if (shop.tab === 3) {
+      CRATES.forEach((c, k) => {
+        const x = 34 + k * 136, bob = k === shop.i ? Math.round(Math.sin(T / 10) * 1.5) : 0;
+        box(x, 40, 116, 100, k === shop.i);
+        hit('crate' + k, x - 2, 38, 120, 104, profileAct, () => { shop.i = k; });
+        drawCrateIcon(x + 58, 76 + bob, c[0] === 'mega', 0, 2);
+        text(c[1], x + 58, 117, 1, '#ffffff', 'center');
+        plain(c[3], x + 58 - c[3].length * 2, 125, G2);
+        if (c[4] === 'keys') { drawKey(x + 40, 132); text(c[2] + ' KEYS', x + 52, 132, 1, '#ffffff'); }
+        else { drawCoin(x + 46, 131); text(String(c[2]), x + 56, 132, 1, '#ffffff'); }
+      });
+      text(shop.i ? 'KEYS COME FROM WINNING CO-OP AND RANKED - NOT BOTS' : 'ENTER TO OPEN - ALWAYS SOMETHING NEW OR COINS BACK', 160, 152, 1, '#ffffff', 'center');
+    } else {
+      const list = shop.tab === 1 ? HATS : SKINS;
+      list.forEach((id, k) => {
+        const x = 14 + (k % 5) * 60, y = 42 + Math.floor(k / 5) * 52;
+        box(x, y, 52, 44, k === shop.i, owns(id) ? '#e0e0e0' : '#ffffff');
+        hit('item' + shop.tab + k, x - 2, y - 2, 56, 48, profileAct, () => { shop.i = k; });
+        drawItem(id, x, y - 4, 52, 40);
+        plain(ITEMS[id][0].slice(0, 12), x + 2, y + 31, OUT);
+        if (owns(id)) plain(equippedAs(id) ? 'WEARING' : 'OWNED', x + 2, y + 38, G2);
+        else if (ITEMS[id][2]) { drawCoin(x + 2, y + 37); plain(String(ITEMS[id][2]), x + 11, y + 38, OUT); }
+        else plain('DEMON ROAD', x + 2, y + 38, G2);
+      });
+      const id = list[shop.i];
+      if (id) {
+        const what = owns(id) ? (equippedAs(id) ? 'ENTER TO TAKE OFF' : 'ENTER TO WEAR') : ITEMS[id][2] ? 'ENTER TO BUY FOR ' + ITEMS[id][2] + ' COINS' : 'GET IT ON THE DEMON ROAD';
+        text(ITEMS[id][0] + ' (' + ITEMS[id][1].toUpperCase() + ') - ' + what, 160, 150, 1, '#ffffff', 'center');
+      }
+    }
+  }
+  if (shop.msgT > 0) { shop.msgT--; text(shop.msg, 160, 160 - 26, 1, '#ffffff', 'center'); }
+  text('Q E - TABS    < BACK', 160, 170, 1, '#9a9a9a', 'center');
+  hit('profileback', 100, 166, 120, 12, () => updateProfileScreens(true, false));
+}
+// the crates, kept simple like the fighters: a white box with a thick outline, the lid's edge and a lock.
+// The mega crate is bigger, with dark bands and a gem in the lock.
+const CRATE_ART = {};
+function crateArt(mega, small) {
+  const key = (mega ? 'mega' : 'crate') + (small ? '-small' : '');
+  if (CRATE_ART[key]) return CRATE_ART[key];
+  const w = small ? (mega ? 26 : 22) : (mega ? 40 : 34), h = small ? (mega ? 19 : 16) : (mega ? 32 : 28), ox = 4, oy = 4, W_ = '#ffffff';
+  const R = (x, y, ww, hh, c) => rect(ox + x, oy + y, ww, hh, c);
+  const g = layer(() => {
+    for (let j = 0; j < h; j++) { const d = Math.min(j, h - 1 - j), i = [3, 1, 1][d] || 0; R(i, j, w - i * 2, 1, W_); }   // rounded body
+    const lid = Math.round(h * .36), lx = Math.round(w / 2) - 4;
+    R(1, lid, w - 2, 2, OUT);                            // the lid's edge
+    if (mega) for (const bx of small ? [4, w - 6] : [6, w - 9]) R(bx, 1, small ? 2 : 3, h - 2, G1);   // dark bands
+    if (small) { R(lx + 1, lid - 2, 6, 6, OUT); R(lx + 3, lid, 2, 2, mega ? W_ : G3); }              // the lock (a gem in the mega one)
+    else { R(lx, lid - 3, 8, 9, OUT); R(lx + 2, lid - 1, 4, 5, mega ? W_ : G3); }
+  });
+  CRATE_ART[key] = { cv: toCanvas(g, false, '#ffffff'), w: w + 8, h: h + 8 };
+  return CRATE_ART[key];
+}
+function drawCrateIcon(cx, cy, mega, shakeX, scale = 1, small = false) {
+  const a = crateArt(mega, small), dw = a.w * scale, dh = a.h * scale;
+  if (scale > 1) rbox(Math.round(cx - dw * .48), Math.round(cy + dh / 2 - 4 * scale), Math.round(dw * .96), 3 * scale, 3, G3);   // a shadow on the floor
+  ctx.drawImage(a.cv, 0, 0, a.w, a.h, Math.round(cx - dw / 2 + shakeX), Math.round(cy - dh / 2), dw, dh);
+}
+function drawCrate() {
+  const a = crateAnim, ready = (a.result || a.err) && a.t > 50;
+  hit('crateanim', 0, 0, W, H, profileAct);
+  if (!ready) {
+    // shake harder and harder, Brawl Stars style
+    const s = Math.min(4, a.t / 10), sx = Math.round((Math.random() * 2 - 1) * s), hop = a.t % 24 < 4 ? -2 : 0;
+    drawCrateIcon(160, 84 + hop, a.crate === 'mega', sx * 2, 3);
+    text('OPENING...', 160, 150, 1, '#ffffff', 'center');
+    return;
+  }
+  if (a.err) { text(a.err, 160, 80, 1, '#ffffff', 'center'); text('ENTER TO GO BACK', 160, 150, 1, '#9a9a9a', 'center'); return; }
+  const r = a.result, burst = a.t - 50;
+  if (burst === 1) { shake(4); sfx.ko(); }
+  for (let k = 0; k < 12; k++) {                         // rays
+    const ang = k / 12 * Math.PI * 2 + T / 60, len = 40 + Math.min(40, burst * 3);
+    ctx.fillStyle = k % 2 ? '#e0e0e0' : '#f0f0f0';
+    for (let d = 20; d < len; d += 2) ctx.fillRect(Math.round(160 + Math.cos(ang) * d), Math.round(80 + Math.sin(ang) * d * .7), 2, 2);
+  }
+  if (r.item) {
+    ctx.save(); ctx.translate(160, 78); ctx.scale(2, 2); ctx.translate(-160, -78);
+    box(134, 58, 52, 40, true); drawItem(r.item, 134, 58, 52, 40);
+    ctx.restore();
+    text(ITEMS[r.item][0], 160, 124, 2, '#ffffff', 'center');
+    text(r.rarity.toUpperCase(), 160, 140, 1, RARITY_LOOK[r.rarity], 'center');
+  } else {
+    text('+' + r.refund + ' COINS', 160, 70, 3, '#ffffff', 'center');
+    text('YOU ALREADY HAVE ALL THE ' + (r.rarity || '').toUpperCase() + ' ITEMS', 160, 100, 1, '#ffffff', 'center');
+  }
+  if (burst > 30) text('ENTER TO CONTINUE', 160, 168, 1, '#9a9a9a', 'center');
+}
 addEventListener('keydown', e => {
   if (game.mode !== 'join') return;
   if (/^Key[A-Z]$/.test(e.code) && net.typed.length < 4) net.typed += e.code[3];
@@ -879,6 +1416,10 @@ let picks = ['rex', 'mako'];
 function startMatch() {
   P1 = makePlayer(0, picks[0]);
   P2 = makePlayer(1, picks[1], picks[1] === picks[0] ? picks[1] + '_alt' : picks[1]);
+  // the bot sometimes wears a hat too
+  if (game.cpu) net.botCos = { hat: Math.random() < .5 ? HATS[Math.random() * 9 | 0] : '', skin: Math.random() < .4 ? SKINS[Math.random() * 7 | 0] : '' };
+  P1.cos = cosFor(0); P2.cos = cosFor(1);
+  game.reward = '';
   game.round = 1;
   startRound();
 }
@@ -1165,7 +1706,20 @@ function step() {
   if (shakeAmt < .3) shakeAmt = 0;
 
   if (menu.msgT > 0) menu.msgT--;
+  for (const k in KEYS) { TAPS[k] = KEYS[k] && !KEYPREV[k]; KEYPREV[k] = KEYS[k]; }
   if (net.role === 'guest') { guestTick(); return; }
+  if (game.mode === 'account' || game.mode === 'shop' || game.mode === 'crate') { updateProfileScreens(escPressed, enterPressed); return; }
+  if (game.mode === 'menu') {
+    // the sidebar (ACCOUNT, SHOP) on the left: A/D to go between it and the main buttons
+    if (tapped('KeyA', 'ArrowLeft', 'KeyD', 'ArrowRight')) { menu.col = menu.col ? 0 : 1; menu.si = menu.si || 0; sfx.click(); }
+    if (menu.col) {
+      if (tapped('KeyW', 'ArrowUp', 'KeyS', 'ArrowDown')) { menu.si ^= 1; sfx.click(); }
+      if (escPressed) { menu.col = 0; goTo('title'); }
+      else if (enterPressed) choose(SIDEBAR[menu.si]);
+      menu.upHeld = KEYS.KeyW || KEYS.ArrowUp; menu.downHeld = KEYS.KeyS || KEYS.ArrowDown;
+      return;
+    }
+  }
   if (game.mode === 'title') { if (enterPressed) { game.mode = 'menu'; menu.i = 0; } return; }
   const list = menuList(game.mode);
   if (list) {
@@ -1248,6 +1802,8 @@ function step() {
       if (game.searching) { picks = [picks[0], ROSTER[Math.random() * 4 | 0]]; startMatch(); return; }   // still waiting: another warm-up
       game.mode = 'over'; game.t = 0;
       if (net.ranked) reportResult(P1.wins >= 2 ? ranked.hostId : ranked.guestId);
+      else if (net.role === 'host') giveReward('coop', '', P1.wins >= 2);          // online co-op win: 6 coins
+      else if (game.cpu) giveReward('bot', game.cpu, P1.wins >= 2);                // bot win: 1, 2 or 3 coins
       if (game.cpu) say(P2, 0);                         // the computer is a good sport: GG
     } else { game.round++; startRound(); }
   } else if (game.mode === 'over') {
@@ -1272,7 +1828,9 @@ function choose(item) {
   else if (item.startsWith('MIC:')) nextMic();
   else if (item === 'VS BOT') goTo('difficulty', 1);
   else if (MENUS.difficulty.includes(item)) { game.cpu = item; openSelect(); }
-  else if (item === 'RANKED') openRanked();
+  else if (item === 'RANKED') { ranked.after = 'ranked'; openRanked(); }
+  else if (item === 'ACCOUNT') needProfile('account');
+  else if (item === 'SHOP') needProfile('shop');
   else if (item === 'CO-OP') goTo('coop');
   else if (item === 'HOST') { game.cpu = null; hostGame(); }
   else if (item === 'JOIN') { game.cpu = null; game.mode = 'join'; net.typed = ''; }
@@ -1281,6 +1839,8 @@ function choose(item) {
   else if (item === 'LEADERBOARD') { if (ranked.me) openBoard(); }
   else if (item.startsWith('SOUND')) { settings.sound = !settings.sound; saveSettings(); }
   else if (item.startsWith('SCREEN SHAKE')) { settings.shake = !settings.shake; saveSettings(); }
+  else if (item.startsWith('CHAT FILTER')) { settings.filter = !settings.filter; saveSettings(); }
+  else if (item.startsWith('HEAR VOICE')) { settings.hearVoice = !settings.hearVoice; saveSettings(); applyVolume(); }
   else if (item === 'CONTROLS') goTo('controls');
   else if (item === 'BACK') goBack();
 }
@@ -1305,8 +1865,11 @@ function frameName(p) {
   }
 }
 function drawFighter(p, name) {
-  const set = p.flash > 0 ? SPR[p.skin].flash : SPR[p.skin].img;
-  const img = set[name || frameName(p)];
+  const cos = p.cos || {};
+  // a cloak ripples all the time, and streams out behind you when you're on the move
+  const moving = ['walk', 'dash', 'jump', 'hit'].includes(p.state) || p.y < FLOOR;
+  const wave = cos.cloak ? Math.floor(T / (moving ? 5 : 9) + p.id * 2) % 4 : 0, flare = cos.cloak && moving ? 1 : 0;
+  const img = getFrame(p.key, name || frameName(p), { alt: p.skin !== p.key, flash: p.flash > 0, hat: cos.hat, skin: cos.skin, cloak: cos.cloak, wave, flare });
   const lift = Math.max(0, FLOOR - p.y);
   if (game.mode !== 'select') {
     ctx.fillStyle = 'rgba(20,10,30,.45)';
@@ -1358,19 +1921,27 @@ function drawWorld() {
     if (w.t < 2) ctx.fillRect(Math.round(w.x) - 3, Math.round(w.y) - 3, 6, 6);
   }
 }
+// round off the corners of something already drawn, by painting the corner pixels in the border colour
+function cutCorners(x, y, w, h, col) {
+  ctx.fillStyle = col;
+  for (const [cx, cy, sx, sy] of [[x, y, 1, 1], [x + w - 1, y, -1, 1], [x, y + h - 1, 1, -1], [x + w - 1, y + h - 1, -1, -1]]) {
+    ctx.fillRect(cx, cy, 1, 1); ctx.fillRect(cx + sx, cy, 1, 1); ctx.fillRect(cx, cy + sy, 1, 1);
+  }
+}
 function bar(x, y, w, h, p, right) {
-  ctx.fillStyle = OUT; ctx.fillRect(x - 2, y - 2, w + 4, h + 4);
+  rbox(x - 2, y - 2, w + 4, h + 4, 3, OUT);
   ctx.fillStyle = '#3a1630'; ctx.fillRect(x, y, w, h);
   const sw = Math.round(w * p.shownHp / 100), hw = Math.round(w * p.hp / 100);
   ctx.fillStyle = '#ff4d4d'; ctx.fillRect(right ? x + w - sw : x, y, sw, h);
   ctx.fillStyle = p.hp < 30 && T % 20 < 10 ? '#ff9a3d' : '#ffd93d'; ctx.fillRect(right ? x + w - hw : x, y, hw, h);
   ctx.fillStyle = '#fff6b0'; ctx.fillRect(right ? x + w - hw : x, y, hw, 1);
+  cutCorners(x, y, w, h, OUT);
 }
 function drawHud() {
   bar(10, 8, 128, 7, P1, false);
   bar(182, 8, 128, 7, P2, true);
-  ctx.fillStyle = OUT; ctx.fillRect(148, 4, 24, 16);
-  ctx.fillStyle = '#2a1745'; ctx.fillRect(149, 5, 22, 14);
+  rbox(147, 3, 26, 18, 4, OUT);
+  rbox(149, 5, 22, 14, 3, '#2a1745');
   text(String(game.timer).padStart(2, '0'), 160, 7, 2, '#ffffff', 'center');
   // names: the gun, plus who's who (ranked shows player names instead)
   const n1 = net.names ? net.names[0] : P1.f.name, n2 = net.names ? net.names[1] : P2.f.name;
@@ -1415,14 +1986,20 @@ function drawBanners() {
       : net.role ? (p1won === (net.role === 'host') ? 'YOU WIN!' : 'YOU LOSE')
       : (p1won ? 'P1 WINS!' : 'P2 WINS!');
     text(label, 160, 56, 5, '#ffd93d', 'center', '#e8463c');
+    // a click on the end screen: rematch (or back to ranked)
+    if (net.role !== 'guest' || net.ranked) hit('over', 0, 0, W, H, () => { if (net.ranked) leaveOnline('MATCH OVER'); else startMatch(); });
     if (net.ranked) {
       text(ranked.result || 'SAVING THE RESULT...', 160, 90, 2, '#ffffff', 'center');
       if (T % 50 < 34) text('ENTER - BACK TO RANKED', 160, 110, 1, '#ffffff', 'center');
-    } else if (T % 50 < 34) text('ENTER - REMATCH     ESC - NEW FIGHTERS', 160, 92, 1, '#ffffff', 'center');
+    } else {
+      if (game.reward) text(game.reward, 160, 104, 1, '#ffffff', 'center');
+      if (T % 50 < 34) text('ENTER - REMATCH     ESC - NEW FIGHTERS', 160, 92, 1, '#ffffff', 'center');
+    }
   }
 }
 function drawTitle() {
   ctx.drawImage(BG, 0, 0);
+  hit('title', 0, 0, W, H, () => { game.mode = 'menu'; menu.i = 0; enterHeld = true; });
   text('TRIGGER', 160, 50, 8, '#ffd93d', 'center', '#e8463c');
   if (T % 50 < 34) text('PRESS ENTER', 160, 108, 2, '#ffffff', 'center');
 }
@@ -1436,11 +2013,18 @@ function drawSelect() {
   const gx = 116, gy = 36, bs = 40, gap = 6;
   ROSTER.forEach((k, i) => {
     const x = gx + (i & 1) * (bs + gap), y = gy + (i >> 1) * (bs + gap);
-    ctx.fillStyle = OUT; ctx.fillRect(x - 2, y - 2, bs + 4, bs + 4);
+    rbox(x - 2, y - 2, bs + 4, bs + 4, 4, OUT);
     ctx.fillStyle = SELECT_BG[k]; ctx.fillRect(x, y, bs, bs);
-    ctx.fillStyle = shade(SELECT_BG[k], 1.3); ctx.fillRect(x, y, bs, 3);
-    ctx.drawImage(SPR[k].img.shoot0, GX - 7, 4, bs, bs, x, y, bs, bs);      // everyone looks alike, so show the gun
+    ctx.drawImage(getFrame(k, 'shoot0', cosFor(0)), GX - 7, 4, bs, bs, x, y, bs, bs);      // everyone looks alike, so show the gun
     ctx.fillStyle = OUT; ctx.fillRect(x - 2, y - 2, bs + 4, 2); ctx.fillRect(x - 2, y + bs, bs + 4, 2); ctx.fillRect(x - 2, y - 2, 2, bs + 4); ctx.fillRect(x + bs, y - 2, 2, bs + 4);
+    cutCorners(x - 2, y - 2, bs + 4, bs + 4, '#ffffff'); cutCorners(x, y, bs, bs, OUT);
+    // the mouse picks for player 1: click a fighter to point at it, click it again to lock in (or to change your mind)
+    if (net.role !== 'guest') hit('pick' + i, x - 2, y - 2, bs + 4, bs + 4, () => {
+      const s = sel[0];
+      if (s.done) { if (s.i === i) { s.done = false; sfx.click(); } }
+      else if (s.i === i) { s.done = true; sfx[FIGHTERS[ROSTER[i]].gun](); shake(2); }
+      else { s.i = i; sfx.click(); }
+    });
   });
   // cursors
   for (const s of sel) {
@@ -1459,6 +2043,7 @@ function drawSelect() {
     const k = ROSTER[s.i], f = FIGHTERS[k], show = selShow[s.id];
     const skin = s.id === 1 && sel[0].i === sel[1].i ? k + '_alt' : k;
     if (show.key !== k || show.skin !== skin) { Object.assign(show, makePlayer(s.id, k, skin)); resetPlayer(show, 0, s.id === 0 ? 1 : -1); }
+    show.cos = cosFor(s.id);
     // drawn at the same pixel size as everything else, so it's just as sharp
     const cx = s.id === 0 ? 50 : 270;
     show.x = cx; show.y = 112;
@@ -1498,7 +2083,7 @@ function drawMenu() {
   text('TRIGGER', 160, 20, 5, '#ffffff', 'center');
   const list = menuList(game.mode);
   if (list) {
-    const gap = 18, top = game.mode === 'ranked' ? 92 : Math.round(104 - list.length * gap / 2);
+    const gap = list.length > 6 ? 13 : list.length > 5 ? 14 : 18, top = game.mode === 'ranked' ? 92 : Math.round(104 - list.length * gap / 2);
     if (TITLES[game.mode]) text(TITLES[game.mode], 160, 48, 1, '#ffffff', 'center');
     if (game.mode === 'ranked') {
       if (ranked.me) {
@@ -1509,10 +2094,25 @@ function drawMenu() {
       if (ranked.status) text(ranked.status, 160, 56, 1, '#ffffff', 'center');
     }
     list.forEach((s, k) => {
-      const on = k === menu.i;
+      const on = k === menu.i && !(game.mode === 'menu' && menu.col);
       text((on ? '> ' : '  ') + s + (on ? ' <' : '  '), 160, top + k * gap, 2, on ? '#ffffff' : '#9a9a9a', 'center');
+      const bw = (s.length + 4) * 8;
+      hit(game.mode + k, 160 - bw / 2, top + k * gap - 3, bw, gap, () => { menu.col = 0; menu.i = k; choose(s); }, () => { menu.col = 0; menu.i = k; });
     });
-    text('W S TO CHOOSE - ENTER TO PICK - ESC TO GO BACK', 160, 150, 1, '#ffffff', 'center');
+    if (game.mode === 'menu') {
+      // the sidebar: ACCOUNT and SHOP, plus your coins in the corner
+      // small square buttons, just an icon; the name shows beside the one you're on
+      SIDEBAR.forEach((s, k) => {
+        const on = menu.col && menu.si === k, y = 8 + k * 26;
+        box(8, y, 18, 18, on, on ? '#ffffff' : '#e8e8e8');
+        if (k === 0) { ctx.fillStyle = OUT; ctx.fillRect(14, y + 2, 6, 6); ctx.fillRect(12, y + 9, 10, 7); ctx.fillStyle = '#ffffff'; ctx.fillRect(15, y + 3, 4, 4); ctx.fillRect(13, y + 10, 8, 6); }
+        else drawCoin(14, y + 6);
+        if (on) text(s, 32, y + 7, 1, '#ffffff');
+        hit('side' + k, 5, y - 3, 24, 24, () => { menu.col = 1; menu.si = k; choose(s); }, () => { menu.col = 1; menu.si = k; });
+      });
+      drawCoins(312, 8);
+    }
+    text(game.mode === 'menu' ? 'W S CHOOSE - A D SIDEBAR - ENTER PICK' : 'W S TO CHOOSE - ENTER TO PICK - ESC TO GO BACK', 160, 150, 1, '#ffffff', 'center');
   } else if (game.mode === 'pickname') {
     text('PICK YOUR RANKED NAME', 160, 52, 1, '#ffffff', 'center');
     text(ranked.typed + (T % 30 < 15 ? '_' : ' '), 160, 70, 3, '#ffffff', 'center');
@@ -1520,6 +2120,7 @@ function drawMenu() {
     text('EVERYONE SEES IT - YOU CAN\'T CHANGE IT LATER', 160, 110, 1, '#c8c8c8', 'center');
     if (ranked.nameErr) text(ranked.nameErr, 160, 124, 1, '#ffffff', 'center');
     text(ranked.typed.trim().length >= 3 ? 'ENTER TO SAVE - ESC TO GO BACK' : 'ESC TO GO BACK', 160, 150, 1, '#9a9a9a', 'center');
+    hit('namesave', 60, 146, 200, 12, () => { if (ranked.typed.trim().length >= 3) saveName(); else goTo('play', 1); });
   } else if (game.mode === 'controls') {
     const lines = [
       ['P1', 'WASD MOVE  F PUNCH  G KICK  H SHOOT'],
@@ -1529,11 +2130,12 @@ function drawMenu() {
       ['', 'DOWN+PUNCH UPPERCUT   DOWN+KICK SWEEP'],
       ['', 'CLOSE + FORWARD + PUNCH THROW'],
       ['', '1-4 QUICK CHAT (P2: 7-0)'],
-      ['', 'ONLINE WITH FRIENDS: T CHAT  V VOICE'],
+      ['', 'ONLINE: T CHAT  V VOICE  M MUTE THEM'],
     ];
     text('CONTROLS', 160, 52, 1, '#ffffff', 'center');
     lines.forEach(([who, s], k) => text((who ? who + '  ' : '') + s, 160, 66 + k * 10, 1, '#ffffff', 'center'));
     text('ENTER OR ESC TO GO BACK', 160, 152, 1, '#9a9a9a', 'center');
+    hit('controlsback', 0, 0, W, H, goBack);
   } else if (game.mode === 'board') {
     text('TOP 20', 160, 50, 1, '#ffffff', 'center');
     if (!ranked.board) text('LOADING...', 160, 80, 1, '#ffffff', 'center');
@@ -1543,11 +2145,13 @@ function drawMenu() {
       text(rankOf(r.points) + ' ' + r.points, x + 148, y, 1, '#ffffff', 'right');
     });
     text('ENTER OR ESC TO GO BACK', 160, 148, 1, '#9a9a9a', 'center');
+    hit('boardback', 0, 0, W, H, goBack);
   } else if (game.mode === 'join') {
     text('TYPE YOUR FRIEND\'S ROOM CODE', 160, 66, 1, '#ffffff', 'center');
     const shown = (net.typed + '____').slice(0, 4).split('').join(' ');
     text(shown, 160, 82, 5, '#ffffff', 'center');
     text(net.typed.length === 4 ? 'PRESS ENTER TO JOIN' : 'ESC TO GO BACK', 160, 124, 1, '#ffffff', 'center');
+    hit('joingo', 80, 120, 160, 12, () => { if (net.typed.length === 4) joinGame(); else goBack(); });
   } else {
     if (net.role === 'host') {
       text('ROOM CODE', 160, 62, 1, '#ffffff', 'center');
@@ -1556,11 +2160,14 @@ function drawMenu() {
     } else text('JOINING ROOM ' + net.code, 160, 80, 2, '#ffffff', 'center');
     text(net.status, 160, 126, 1, T % 50 < 34 ? '#ffffff' : '#9a9a9a', 'center');
     text('ESC TO CANCEL', 160, 146, 1, '#9a9a9a', 'center');
+    hit('lobbycancel', 100, 142, 120, 12, () => leaveOnline());
   }
   if (menu.msgT > 0) text(menu.msg, 160, 160, 1, '#ffffff', 'center');
 }
 function draw() {
+  HITS = [];
   if (game.mode === 'title') { drawTitle(); if (menu.msgT > 0) text(menu.msg, 160, 160, 1, '#ffffff', 'center'); }
+  else if (['account', 'shop', 'crate'].includes(game.mode)) drawProfileScreens();
   else if (MENUS[game.mode] || ['join', 'lobby', 'board', 'controls', 'pickname'].includes(game.mode)) drawMenu();
   else if (game.mode === 'select') drawSelect();
   else { drawWorld(); drawHud(); drawBanners(); }
