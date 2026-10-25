@@ -894,6 +894,7 @@ async function saveName() {
 }
 addEventListener('keydown', e => {
   if (game.mode !== 'pickname') return;
+  if (e.code === 'Tab') { e.preventDefault(); openAuthForm('signin', 'pickname'); return; }    // already have an account: sign in instead
   if ((/^Key[A-Z]$/.test(e.code) || /^Digit[0-9]$/.test(e.code)) && ranked.typed.length < 12) ranked.typed += e.code.slice(-1);
   else if (e.code === 'Space' && ranked.typed.length < 12 && ranked.typed && !ranked.typed.endsWith(' ')) ranked.typed += ' ';
   else if (e.code === 'Backspace') ranked.typed = ranked.typed.slice(0, -1);
@@ -1067,11 +1068,16 @@ function loginOptions() {
   return ranked.anon ? ['SAVE ACCOUNT - SET A PASSWORD', 'SIGN IN TO AN ACCOUNT', 'DELETE ACCOUNT']
                      : ['SIGN IN TO ANOTHER ACCOUNT', 'CHANGE PASSWORD', 'SIGN OUT', 'DELETE ACCOUNT'];
 }
-function openAuthForm(kind) {
+function openAuthForm(kind, from) {
   const f = { save: [['NEW PASSWORD', true], ['TYPE IT AGAIN', true]], change: [['NEW PASSWORD', true], ['TYPE IT AGAIN', true]],
               signin: [['NAME', false], ['PASSWORD', true]], delete: [['TYPE DELETE TO CONFIRM', false]] }[kind];
-  Object.assign(authForm, { kind, fields: f.map(([label, secret]) => ({ label, secret, value: '' })), i: 0, msg: '', busy: false });
+  // from: where you came from (the account screen, or the pick-a-name screen on your way into ranked)
+  Object.assign(authForm, { kind, from: from || 'account', fields: f.map(([label, secret]) => ({ label, secret, value: '' })), i: 0, msg: '', busy: false });
   game.mode = 'authform';
+}
+function leaveAuthForm() {
+  if (authForm.from === 'pickname') game.mode = 'pickname';
+  else { game.mode = 'account'; shop.tab = 2; }
 }
 function loginAction(item) {
   if (item.startsWith('SAVE ACCOUNT')) openAuthForm('save');
@@ -1115,7 +1121,12 @@ async function submitAuth() {
     shop.msg = { save: 'ACCOUNT SAVED - SIGN IN ANYWHERE WITH YOUR NAME', change: 'PASSWORD CHANGED', signin: 'SIGNED IN AS ' + (ranked.me && ranked.me.name), delete: 'ACCOUNT DELETED' }[f.kind];
     shop.msgT = 200; sfx.rack();
     f.busy = false;
-    game.mode = f.kind === 'delete' ? 'menu' : 'account'; shop.tab = 2; shop.i = 0;
+    shop.i = 0;
+    if (f.kind === 'delete') game.mode = 'menu';
+    else if (f.from === 'pickname') {                    // signed in on the way into ranked, the shop or your account: carry on there
+      const next = ranked.after || 'ranked';
+      game.mode = next; shop.tab = 0; menu.i = 0;
+    } else { game.mode = 'account'; shop.tab = 2; }
   } catch (e) { fail(e.message); }
 }
 async function signOutNow() {
@@ -1144,7 +1155,7 @@ addEventListener('keydown', e => {
   if (e.ctrlKey || e.metaKey) return;                    // let Ctrl+V and friends through to the paste above
   const f = authForm, field = f.fields[f.i];
   e.preventDefault();
-  if (e.key === 'Escape') { game.mode = 'account'; shop.tab = 2; escHeld = true; return; }
+  if (e.key === 'Escape') { leaveAuthForm(); escHeld = true; return; }
   if (e.key === 'Enter') { if (f.i < f.fields.length - 1) f.i++; else submitAuth(); enterHeld = true; return; }
   if (e.key === 'Tab' || e.key === 'ArrowDown') { f.i = (f.i + 1) % f.fields.length; return; }
   if (e.key === 'ArrowUp') { f.i = (f.i + f.fields.length - 1) % f.fields.length; return; }
@@ -1174,7 +1185,7 @@ function drawAuthForm() {
   text(go, 160, 139, 1, '#ffffff', 'center');
   hit('authgo', 108, 134, 104, 16, submitAuth);
   text('ENTER - NEXT / ' + go + '    ESC - CANCEL', 160, 167, 1, '#9a9a9a', 'center');
-  hit('authback', 100, 163, 120, 12, () => { game.mode = 'account'; shop.tab = 2; });
+  hit('authback', 100, 163, 120, 12, leaveAuthForm);
 }
 // Account, Shop and Ranked all need a name; the first time, pick one, then carry on to where you were going
 async function needProfile(next) {
@@ -2260,6 +2271,10 @@ function drawMenu() {
     if (ranked.nameErr) text(ranked.nameErr, 160, 124, 1, '#ffffff', 'center');
     text(ranked.typed.trim().length >= 3 ? 'ENTER TO SAVE - ESC TO GO BACK' : 'ESC TO GO BACK', 160, 150, 1, '#9a9a9a', 'center');
     hit('namesave', 60, 146, 200, 12, () => { if (ranked.typed.trim().length >= 3) saveName(); else goTo('play', 1); });
+    // already made an account on another computer? sign in to it instead of making a new one
+    box(80, 132, 160, 9, false);
+    text('HAVE AN ACCOUNT? SIGN IN - TAB', 160, 134, 1, '#ffffff', 'center');
+    hit('namesignin', 78, 130, 164, 13, () => openAuthForm('signin', 'pickname'));
   } else if (game.mode === 'controls') {
     const lines = [
       ['P1', 'WASD MOVE  F PUNCH  G KICK  H SHOOT'],
