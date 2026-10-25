@@ -1,0 +1,1587 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TRIGGER</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); image-rendering: pixelated; }
+</style>
+</head>
+<body>
+<canvas id="screen"></canvas>
+<script>
+'use strict';
+// TRIGGER: a street fighter with guns. Phase 1: Rex vs Mako, two players on one keyboard.
+// Everything is drawn at 320x180 and scaled up in whole pixels.
+
+const W = 320, H = 180, FLOOR = 160, OUT = '#1b1225';
+const screen = document.getElementById('screen'), sctx = screen.getContext('2d');
+const low = document.createElement('canvas');
+low.width = W; low.height = H;
+const ctx = low.getContext('2d', { willReadFrequently: true });
+let S = 1;
+function fit() {
+  S = Math.max(1, Math.floor(Math.min(innerWidth / W, innerHeight / H)));
+  screen.width = W * S; screen.height = H * S;
+}
+addEventListener('resize', fit);
+fit();
+
+function shade(hex, k) {
+  const n = parseInt(hex.slice(1), 16);
+  const f = v => Math.max(0, Math.min(255, Math.round(v * k)));
+  return '#' + ((1 << 24) | (f(n >> 16) << 16) | (f((n >> 8) & 255) << 8) | f(n & 255)).toString(16).slice(1);
+}
+function mulberry(a) {
+  return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+
+// ---------------------------------------------------------------- fighters and their guns
+const ROSTER = ['rex', 'mako', 'vex', 'bolt'];
+// everyone is the same plain fighter (same body, same speed, no hair): only the gun is different
+const BODY = { skin: '#f0b088', shirt: '#e8463c', sleeve: '#e8463c', pants: '#2f3a66', shoe: '#f4f0e6', belt: '#2f3a66', glove: '#f0b088' };
+const FIGHTERS = {
+  rex:  { name: 'PISTOL',  gun: 'pistol',  tw: 10, c: BODY, desc: 'ALL-ROUNDER' },
+  mako: { name: 'SHOTGUN', gun: 'shotgun', tw: 10, c: BODY, desc: 'UP CLOSE', twoHand: true },
+  vex:  { name: 'SNIPER',  gun: 'sniper',  tw: 10, c: BODY, desc: 'KEEP AWAY', twoHand: true },
+  bolt: { name: 'SMG',     gun: 'smg',     tw: 10, c: BODY, desc: 'RUSHDOWN' },
+};
+const GUNS = {
+  // mag is all the ammo you get for the whole round: there's no reloading
+  pistol:  { mag: 6,  startup: 4,  recover: 11, dmg: 6,  speed: 6,   pellets: 1, spread: 0,  life: 70, kb: 1,   stun: 12, muzzle: 18, recoil: 0.4, shake: 1 },
+  shotgun: { mag: 2,  startup: 7,  recover: 24, dmg: 5,  speed: 6.5, pellets: 4, spread: .7, life: 15, kb: 1.6, stun: 16, muzzle: 22, recoil: 1.5, shake: 3 },
+  sniper:  { mag: 3,  startup: 14, recover: 22, dmg: 16, speed: 11,  pellets: 1, spread: 0,  life: 40, kb: 3,   stun: 24, muzzle: 29, recoil: 1,   shake: 4 },
+  smg:     { mag: 15, startup: 3,  recover: 16, dmg: 3,  speed: 7,   pellets: 1, spread: 0,  life: 60, kb: .5,  stun: 8,  muzzle: 20, recoil: .2,  shake: 1, burst: 3, gap: 4 },
+};
+// hit boxes are measured from the feet, forwards and up
+const ATTACKS = {
+  punch: { name: 'punch', start: 4, active: 3,  rec: 9,  dmg: 6,  x: 6, w: 15, y: -34, h: 9,  stun: 15, kb: 1.4, stop: 5 },
+  kick:  { name: 'kick',  start: 8, active: 4,  rec: 14, dmg: 11, x: 4, w: 19, y: -21, h: 11, stun: 20, kb: 3,   stop: 7 },
+  jkick: { name: 'jkick', start: 0, active: 99, rec: 0,  dmg: 8,  x: 3, w: 17, y: -21, h: 13, stun: 17, kb: 2,   stop: 6 },
+  // down + punch: a rising uppercut that reaches high and launches; down + kick: a sweep along the floor that trips
+  upper: { name: 'upper', start: 5, active: 5,  rec: 18, dmg: 10, x: 2, w: 15, y: -50, h: 32, stun: 20, kb: 1,   stop: 8, launch: true },
+  sweep: { name: 'sweep', start: 7, active: 4,  rec: 20, dmg: 8,  x: 4, w: 24, y: -9,  h: 9,  stun: 20, kb: 1.2, stop: 6, low: true, trip: true },
+};
+const THROW = { start: 3, range: 24, dmg: 12, whiff: 22, length: 20 };
+
+// ---------------------------------------------------------------- pixel art, drawn by code
+// Each frame is drawn in three layers (back limbs, body, front arm) and every layer gets
+// its own thick (2 pixel) dark outline, so the parts read clearly even where they overlap.
+const SZ = 64, GX = 32, GY = 52;
+let G;
+function px(x, y, c) { x = Math.round(x); y = Math.round(y); if (x >= 0 && y >= 0 && x < SZ && y < SZ) G[y * SZ + x] = c; }
+function rect(x, y, w, h, c) { x = Math.round(x); y = Math.round(y); for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) px(x + i, y + j, c); }
+function disc(cx, cy, r, c, test) {
+  for (let y = -r - 1; y <= r + 1; y++) for (let x = -r - 1; x <= r + 1; x++)
+    if (x * x + y * y <= r * r + r * .6 && (!test || test(cx + x, cy + y))) px(cx + x, cy + y, c);
+}
+function seg(a, b, t, c) {
+  const n = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) * 2));
+  for (let i = 0; i <= n; i++) {
+    const x = a[0] + (b[0] - a[0]) * i / n, y = a[1] + (b[1] - a[1]) * i / n;
+    rect(Math.round(x - t / 2 + .01), Math.round(y - t / 2 + .01), t, t, c);
+  }
+}
+// where a knee (bends forwards) or an elbow (bends down) goes between two points
+function joint(a, b, L, down) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], d = Math.hypot(dx, dy) || 1, h = Math.sqrt(Math.max(0, L * L - d * d / 4));
+  let ux = -dy / d, uy = dx / d;
+  if (down ? uy < 0 : ux < 0) { ux = -ux; uy = -uy; }
+  return [(a[0] + b[0]) / 2 + ux * h, (a[1] + b[1]) / 2 + uy * h];
+}
+function ring(g, diagonal) {
+  const o = g.slice();
+  for (let y = 0; y < SZ; y++) for (let x = 0; x < SZ; x++) {
+    if (g[y * SZ + x]) continue;
+    const at = (dx, dy) => { const X = x + dx, Y = y + dy; return X >= 0 && Y >= 0 && X < SZ && Y < SZ && g[Y * SZ + X]; };
+    if (at(-1, 0) || at(1, 0) || at(0, -1) || at(0, 1) || (diagonal && (at(-1, -1) || at(1, -1) || at(-1, 1) || at(1, 1)))) o[y * SZ + x] = OUT;
+  }
+  return o;
+}
+function layer(fn) {
+  G = new Array(SZ * SZ).fill(null);
+  fn();
+  return ring(ring(G, false), true);
+}
+
+function renderGrid(f, p) {
+  const c = f.c, gx = GX, gy = GY, hy = p.hy;
+  const hip = [gx + (p.hx || 0), gy - hy], lean = p.lean || 0;
+  const top = [hip[0] + lean, hip[1] - 12];
+  const fs = [top[0] + 2, top[1] + 3], bs = [top[0] - 2, top[1] + 3];
+  const ff = [gx + p.ff[0], gy - 2 - p.ff[1]], bf = [gx + p.bf[0], gy - 2 - p.bf[1]];
+  const fh = [fs[0] + p.fh[0], fs[1] + p.fh[1]], bh = [bs[0] + p.bh[0], bs[1] + p.bh[1]];
+  const leg = (foot, col, shoe) => {
+    const k = joint(hip, foot, foot === ff && p.kneeLeg ? p.kneeLeg : 8.6, false);
+    seg(hip, k, 4, col); seg(k, foot, 4, col);
+    rect(foot[0] - 2, foot[1] - 1, 6, 3, shoe);
+  };
+  const arm = (sh, hand, sleeve, skin, glove) => {
+    const e = joint(sh, hand, 5.6, true);
+    seg(sh, e, 3, sleeve); seg(e, hand, 3, skin);
+    rect(hand[0] - 2, hand[1] - 2, 4, 4, glove);
+  };
+  const gun = h => {
+    if (f.gun === 'pistol') {
+      rect(h[0] - 1, h[1] - 3, 8, 2, '#6b7390'); rect(h[0] + 1, h[1] - 3, 5, 1, '#9aa3c0');
+      rect(h[0] - 1, h[1] - 1, 3, 3, '#3a3f4f');
+    } else if (f.gun === 'sniper') {
+      rect(h[0] - 8, h[1] - 3, 26, 2, '#6b7390'); rect(h[0] - 6, h[1] - 3, 22, 1, '#9aa3c0');
+      rect(h[0], h[1] - 6, 8, 2, '#3a3f4f'); px(h[0] + 7, h[1] - 6, '#7fd8ff');
+      rect(h[0] - 12, h[1] - 2, 6, 3, '#4a3a5a');
+    } else if (f.gun === 'smg') {
+      rect(h[0] - 2, h[1] - 3, 11, 3, '#3a3f4f'); rect(h[0], h[1] - 3, 8, 1, '#6b7390');
+      rect(h[0] + 3, h[1], 2, 4, '#2a2a35');
+    } else {
+      rect(h[0] - 7, h[1] - 3, 19, 2, '#6b7390'); rect(h[0] - 5, h[1] - 3, 15, 1, '#9aa3c0');
+      rect(h[0] - 10, h[1] - 2, 6, 3, '#7a4a2a'); rect(h[0] + 4, h[1] - 1, 5, 2, '#9a6038');
+    }
+  };
+  const back = layer(() => {
+    leg(bf, shade(c.pants, .68), shade(c.shoe, .7));
+    arm(bs, bh, shade(c.sleeve, .7), shade(c.skin, .76), shade(c.glove, .72));
+  });
+  const body = layer(() => {
+    for (let y = top[1]; y <= hip[1]; y++) {
+      const t = (hip[1] - y) / 12, cx = hip[0] + lean * t, w = f.tw + (y < top[1] + 3 ? 1 : 0);
+      rect(Math.round(cx - w / 2), y, w, 1, c.shirt);
+    }
+    rect(hip[0] - f.tw / 2, hip[1] - 1, f.tw, 2, c.belt);
+    // a plain round head: no hair, just an eye so you can tell which way they face
+    const hc = [top[0] + 1 + (p.headX || 0), top[1] - 5 + (p.headY || 0)];
+    rect(top[0] - 1, top[1] - 2, 3, 3, c.skin);
+    disc(hc[0], hc[1], 5, c.skin);
+    rect(hc[0] + 3, hc[1] - 1, 1, 2, OUT);
+    leg(ff, c.pants, c.shoe);
+  });
+  const front = layer(() => {
+    if (p.gun) gun(fh);
+    arm(fs, fh, c.sleeve, c.skin, c.glove);
+  });
+  const out = back.slice();
+  for (let i = 0; i < out.length; i++) { if (body[i]) out[i] = body[i]; if (front[i]) out[i] = front[i]; }
+  return out;
+}
+
+function poses(f) {
+  const base = { hy: 18, lean: 1, ff: [5, 0], bf: [-5, 0], fh: [5, -6], bh: [4, -4] };
+  const P = o => Object.assign({}, base, o);
+  const two = f.twoHand;
+  return {
+    idle0: P({}),
+    idle1: P({ hy: 17, fh: [5, -5], bh: [4, -3] }),
+    walk0: P({ ff: [6, 0], bf: [-5, 0] }),
+    walk1: P({ ff: [4, 2], bf: [-5, 0], hy: 19 }),
+    walk2: P({ ff: [4, 0], bf: [-3, 0] }),
+    walk3: P({ ff: [5, 0], bf: [-3, 2], hy: 19 }),
+    crouch: P({ hy: 11, ff: [6, 0], bf: [-6, 0], lean: 2, fh: [5, -3], bh: [4, -2] }),
+    jump: P({ ff: [5, 6], bf: [-3, 4], fh: [4, -7], bh: [3, -6] }),
+    fall: P({ ff: [4, 2], bf: [-5, 1], fh: [6, -4], bh: [4, -2] }),
+    punch0: P({ lean: 0, fh: [0, -2], bh: [5, -5], ff: [6, 0], bf: [-6, 0] }),
+    punch1: P({ lean: 3, fh: [12, -3], bh: [2, -2], ff: [8, 0], bf: [-6, 0], headX: 1 }),
+    kick0: P({ lean: -1, ff: [4, 8], fh: [3, -5], bh: [-2, -2] }),
+    kick1: P({ lean: -3, ff: [15, 13], bf: [-4, 0], fh: [-3, 0], bh: [-4, 2] }),
+    jkick: P({ lean: -3, ff: [15, 13], bf: [-3, 5], fh: [-3, 0], bh: [-4, 2] }),
+    shoot0: P({ lean: 0, fh: [9, -1], bh: two ? [10, 0] : [3, -2], gun: 1 }),
+    shoot1: P({ lean: -2, fh: [7, -3], bh: two ? [8, -2] : [2, -2], headX: -1, gun: 1 }),
+    hit: P({ lean: -4, hy: 17, headX: -2, fh: [-2, 2], bh: [-4, 3], ff: [5, 0], bf: [-7, 0] }),
+    block: P({ lean: -1, fh: [6, -7], bh: [6, -5], ff: [5, 0], bf: [-6, 0] }),
+    cblock: P({ hy: 11, ff: [6, 0], bf: [-6, 0], fh: [6, -5], bh: [6, -4] }),
+    dash: P({ lean: 4, ff: [9, 1], bf: [-8, 2], fh: [6, -3], bh: [3, 0], hy: 16 }),
+    upper0: P({ hy: 12, lean: 2, ff: [6, 0], bf: [-6, 0], fh: [2, -1], bh: [4, -2] }),
+    upper1: P({ hy: 20, lean: 2, ff: [4, 3], bf: [-4, 0], fh: [4, -14], bh: [2, -1], headX: 1 }),
+    sweep0: P({ hy: 10, lean: -1, ff: [6, 0], bf: [-6, 0], fh: [4, -2], bh: [3, 0] }),
+    sweep1: P({ hy: 9, lean: -4, ff: [17, 1], bf: [-5, 0], fh: [-2, 4], bh: [-4, 5] }),
+    throw0: P({ lean: 2, ff: [7, 0], bf: [-6, 0], fh: [10, -2], bh: [10, 0] }),
+    throw1: P({ lean: -3, ff: [5, 0], bf: [-7, 0], fh: [3, -12], bh: [1, -11], headX: -1 }),
+    // falling over: knocked back, tumbling through the air, flat on the floor (turned on its side below), sitting up
+    fall0: P({ lean: -6, hy: 17, headX: -3, headY: 1, fh: [-6, -4], bh: [-7, -2], ff: [8, 6], bf: [-3, 0] }),
+    fall1: P({ lean: -10, hy: 14, headX: -3, fh: [-8, -2], bh: [-9, 0], ff: [12, 10], bf: [8, 7] }),
+    lie: P({ lean: 0, fh: [-3, 9], bh: [-4, 9], ff: [-4, 7], bf: [-5, 0], kneeLeg: 12 }),   // one knee up (a longer bend so it shows), the other leg flat
+    sit: P({ hy: 5, lean: -3, ff: [12, 0], bf: [9, 0], fh: [-4, 8], bh: [-6, 9], headX: -1 }),
+  };
+}
+
+function toCanvas(grid, flash, fill) {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = SZ;
+  const x = cv.getContext('2d');
+  for (let i = 0; i < grid.length; i++) {
+    const col = grid[i];
+    if (!col) continue;
+    // fighters are plain white inside their black outlines; a hit flashes them solid black
+    x.fillStyle = col === OUT ? OUT : flash ? OUT : fill;
+    x.fillRect(i % SZ, (i / SZ) | 0, 1, 1);
+  }
+  return cv;
+}
+// turn a standing frame a quarter turn onto its back, pixel for pixel (so it stays crisp):
+// head towards the back, feet just in front of where the fighter stands, back on the floor
+function lieDown(g) {
+  // first find the lowest pixel once turned, so the body (legs and all) rests right on the floor
+  let low = 0;
+  for (let y = 0; y < SZ; y++) for (let x = 0; x < SZ; x++) if (g[y * SZ + x]) low = Math.max(low, GX - x);
+  const o = new Array(SZ * SZ).fill(null);
+  for (let y = 0; y < SZ; y++) for (let x = 0; x < SZ; x++) {
+    const c = g[y * SZ + x];
+    if (!c) continue;
+    const x2 = GX + 18 - (GY - y), y2 = GY + 1 - low + (GX - x);
+    if (x2 >= 0 && y2 >= 0 && x2 < SZ && y2 < SZ) o[y2 * SZ + x2] = c;
+  }
+  return o;
+}
+// every fighter in white, plus a light grey second outfit for mirror matches
+const SPR = {};
+for (const k in FIGHTERS) {
+  const f = FIGHTERS[k], ps = poses(f);
+  for (const [name, fill] of [[k, '#ffffff'], [k + '_alt', '#b8b8b8']]) {
+    SPR[name] = { img: {}, flash: {} };
+    for (const n in ps) {
+      const g = n === 'lie' ? lieDown(renderGrid(f, ps[n])) : renderGrid(f, ps[n]);
+      SPR[name].img[n] = toCanvas(g, false, fill);
+      SPR[name].flash[n] = toCanvas(g, true, fill);
+    }
+  }
+}
+
+// ---------------------------------------------------------------- the stage: plain white, with a line to stand on
+const BG = document.createElement('canvas');
+BG.width = W; BG.height = H;
+(function () {
+  const b = BG.getContext('2d');
+  b.fillStyle = '#ffffff'; b.fillRect(0, 0, W, H);
+  b.fillStyle = OUT; b.fillRect(0, FLOOR, W, 2);
+})();
+(function () {
+  return;   // the old city street, kept in case it comes back
+  // drawn like ink on paper: white shapes, thick black outlines
+  const b = BG.getContext('2d'), rnd = mulberry(7);
+  const box = (x, y, w, h, t = 2, fill = '#ffffff') => { b.fillStyle = OUT; b.fillRect(x - t, y - t, w + t * 2, h + t * 2); b.fillStyle = fill; b.fillRect(x, y, w, h); };
+  b.fillStyle = '#ffffff'; b.fillRect(0, 0, W, H);
+  // the sun: an outlined circle
+  const sx = 236, sy = 74;
+  for (const [r, col] of [[24, OUT], [22, '#ffffff']]) {
+    b.fillStyle = col;
+    for (let y = -r; y <= r; y++) { const w = Math.floor(Math.sqrt(r * r - y * y)); b.fillRect(sx - w, sy + y, w * 2, 1); }
+  }
+  // far city: pale grey shapes with no outline, so it sits back
+  let x = 0;
+  while (x < W) {
+    const w = 10 + rnd() * 18 | 0, h = 26 + rnd() * 44 | 0;
+    b.fillStyle = '#e4e4e4'; b.fillRect(x, 134 - h, w, h + 20);
+    x += w;
+  }
+  // near buildings: white with black outlines and windows
+  x = -6;
+  while (x < W) {
+    const w = 24 + rnd() * 30 | 0, h = 36 + rnd() * 50 | 0, top = 150 - h;
+    if (rnd() < .5) box(x + 5, top - 8, 7, 6);                  // a water tank on the roof
+    box(x, top, w, h + 20);
+    for (let wy = top + 5; wy < 142; wy += 8) for (let wx = x + 4; wx < x + w - 6; wx += 7) {
+      const q = rnd();
+      if (q < .35) { b.fillStyle = OUT; b.fillRect(wx, wy, 4, 5); }
+      else if (q < .75) { b.fillStyle = OUT; b.fillRect(wx, wy, 4, 5); b.fillStyle = '#ffffff'; b.fillRect(wx + 1, wy + 1, 2, 3); }
+    }
+    x += w + 4 + (rnd() * 10 | 0);
+  }
+  // street lamps
+  for (const lx of [36, 284]) {
+    box(lx - 1, 96, 3, 54);
+    box(lx - 1, 94, 12, 3);
+    box(lx + 7, 98, 5, 2);
+  }
+  // sidewalk, curb, road
+  box(-4, 150, W + 8, 7);
+  b.fillStyle = OUT; for (let tx = 0; tx < W; tx += 20) b.fillRect(tx, 150, 2, 7);
+  box(-4, 160, W + 8, 30);
+  for (let lx = 4; lx < W; lx += 24) { b.fillStyle = OUT; b.fillRect(lx, 171, 12, 3); }
+  for (let i = 0; i < 40; i++) { b.fillStyle = '#c8c8c8'; b.fillRect(rnd() * W | 0, 163 + rnd() * 16 | 0, 2, 1); }
+})();
+
+// ---------------------------------------------------------------- a tiny chunky font
+const FONTSRC = {
+  A: '.#. #.# ### #.# #.#', B: '##. #.# ##. #.# ##.', C: '.## #.. #.. #.. .##', D: '##. #.# #.# #.# ##.', E: '### #.. ##. #.. ###',
+  F: '### #.. ##. #.. #..', G: '.## #.. #.# #.# .##', H: '#.# #.# ### #.# #.#', I: '### .#. .#. .#. ###', J: '..# ..# ..# #.# .#.',
+  K: '#.# #.# ##. #.# #.#', L: '#.. #.. #.. #.. ###', M: '#.# ### ### #.# #.#', N: '##. #.# #.# #.# #.#', O: '.#. #.# #.# #.# .#.',
+  P: '##. #.# ##. #.. #..', Q: '.#. #.# #.# ##. .##', R: '##. #.# ##. #.# #.#', S: '.## #.. .#. ..# ##.', T: '### .#. .#. .#. .#.',
+  U: '#.# #.# #.# #.# ###', V: '#.# #.# #.# #.# .#.', W: '#.# #.# ### ### #.#', X: '#.# #.# .#. #.# #.#', Y: '#.# #.# .#. .#. .#.',
+  Z: '### ..# .#. #.. ###', 0: '### #.# #.# #.# ###', 1: '.#. ##. .#. .#. ###', 2: '##. ..# .#. #.. ###', 3: '##. ..# .#. ..# ##.',
+  4: '#.# #.# ### ..# ..#', 5: '### #.. ##. ..# ##.', 6: '.## #.. ### #.# ###', 7: '### ..# .#. .#. .#.', 8: '### #.# ### #.# ###',
+  9: '### #.# ### ..# ##.', '!': '.#. .#. .#. ... .#.', '.': '... ... ... ... .#.', ':': '... .#. ... .#. ...', '-': '... ... ### ... ...',
+  "'": '.#. .#. ... ... ...', '/': '..# ..# .#. #.. #..', '+': '... .#. ### .#. ...', '?': '##. ..# .#. ... .#.', ';': '... .#. ... .#. #..', '>': '#.. .#. ..# .#. #..', '<': '..# .#. #.. .#. ..#', ' ': '... ... ... ... ...',
+};
+const FONT = {};
+for (const k in FONTSRC) FONT[k] = FONTSRC[k].split(' ');
+function text(s, x, y, sc, col, align = 'left', shadow = null) {
+  s = String(s).toUpperCase();
+  const w = s.length * 4 * sc - sc;
+  const x0 = Math.round(align === 'center' ? x - w / 2 : align === 'right' ? x - w : x);
+  const o = Math.max(1, sc >> 1);
+  const passes = shadow ? [0, 1, 2] : [0, 2];
+  for (const pass of passes) for (let i = 0; i < s.length; i++) {
+    const g = FONT[s[i]];
+    if (!g) continue;
+    for (let r = 0; r < 5; r++) for (let cc = 0; cc < 3; cc++) if (g[r][cc] === '#') {
+      const X = x0 + i * 4 * sc + cc * sc, Y = y + r * sc;
+      if (pass === 0) { ctx.fillStyle = OUT; ctx.fillRect(X - o, Y - o, sc + o * 2, sc + o * 2 + (shadow ? o : 0)); }
+      else if (pass === 1) { ctx.fillStyle = shadow; ctx.fillRect(X, Y + o, sc, sc); }
+      else { ctx.fillStyle = col; ctx.fillRect(X, Y, sc, sc); }
+    }
+  }
+}
+
+// ---------------------------------------------------------------- sound: little synth blips
+let AC = null, NB = null;
+function audio() {
+  if (AC) { if (AC.state === 'suspended') AC.resume(); return; }
+  try {
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    NB = AC.createBuffer(1, AC.sampleRate, AC.sampleRate);
+    const d = NB.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  } catch (e) { AC = null; }
+}
+function noise(dur, vol, freq, type = 'lowpass') {
+  if (!AC || !settings.sound) return;
+  const s = AC.createBufferSource(), f = AC.createBiquadFilter(), g = AC.createGain(), t = AC.currentTime;
+  s.buffer = NB; f.type = type; f.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  s.connect(f).connect(g).connect(AC.destination);
+  s.start(t, Math.random() * 0.5); s.stop(t + dur);
+}
+function tone(f0, f1, dur, vol, wave = 'square') {
+  if (!AC || !settings.sound) return;
+  const o = AC.createOscillator(), g = AC.createGain(), t = AC.currentTime;
+  o.type = wave;
+  o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(AC.destination);
+  o.start(t); o.stop(t + dur);
+}
+const sfx = {
+  swing: () => noise(.07, .15, 2500, 'bandpass'),
+  hit: () => { noise(.1, .5, 900); tone(180, 50, .12, .35, 'sine'); },
+  hitB: () => { noise(.06, .35, 1400); tone(300, 80, .06, .2); },
+  block: () => { tone(1300, 900, .06, .15, 'triangle'); noise(.04, .2, 4000, 'highpass'); },
+  pistol: () => { noise(.14, .45, 2600); tone(700, 90, .07, .2); },
+  shotgun: () => { noise(.3, .7, 1100); tone(160, 35, .22, .45, 'sawtooth'); },
+  sniper: () => { noise(.45, .6, 1800); tone(1200, 60, .35, .3, 'sawtooth'); },
+  smg: () => { noise(.06, .3, 3200); tone(900, 200, .04, .12); },
+  empty: () => tone(2200, 2000, .03, .15),
+  click: () => tone(1500, 1200, .03, .15),
+  rack: () => { tone(500, 800, .04, .18); setTimeout(() => tone(900, 600, .04, .18), 70); },
+  jump: () => tone(220, 440, .08, .08),
+  land: () => noise(.05, .15, 600),
+  dash: () => noise(.12, .2, 1800, 'bandpass'),
+  ko: () => { tone(400, 40, .9, .35, 'sawtooth'); noise(.4, .5, 500); },
+  thud: () => { noise(.15, .5, 400); tone(90, 40, .15, .4, 'sine'); },
+  bell: () => tone(880, 870, .6, .2, 'triangle'),
+};
+// online, the host also tells the other computer which sounds to play
+for (const k in sfx) { const play = sfx[k]; sfx[k] = () => { if (net.role === 'host') net.sounds.push(k); play(); }; }
+
+// ---------------------------------------------------------------- input
+const KEYS = {};
+addEventListener('keydown', e => {
+  KEYS[e.code] = true;
+  if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
+  audio();
+});
+addEventListener('keyup', e => { KEYS[e.code] = false; });
+const CONTROLS = [
+  { left: ['KeyA'], right: ['KeyD'], up: ['KeyW'], down: ['KeyS'], punch: ['KeyF'], kick: ['KeyG'], shoot: ['KeyH'] },
+  { left: ['ArrowLeft'], right: ['ArrowRight'], up: ['ArrowUp'], down: ['ArrowDown'],
+    punch: ['KeyJ', 'Numpad1'], kick: ['KeyK', 'Numpad2'], shoot: ['KeyL', 'Numpad3'] },
+];
+// what one keyboard is holding; online, either set of keys works for the one player at it
+function keysHeld(sets) {
+  const i = {};
+  for (const k in CONTROLS[0]) i[k] = !chat.typing && sets.some(c => c[k].some(x => KEYS[x]));    // typing a message doesn't move you
+  return i;
+}
+function readInput(p) {
+  const i = game.cpu && p.id === 1 ? aiInput(P2, P1)
+    : net.role === 'host' && p.id === 1 ? Object.assign({}, net.remote)
+    : keysHeld(net.role ? CONTROLS : [CONTROLS[p.id]]);
+  const pr = {};
+  for (const k in i) pr[k] = i[k] && !p.held[k];
+  p.held = i; p.in = i; p.pr = pr;
+}
+let enterHeld = false, escHeld = false;
+
+// ---------------------------------------------------------------- online: one computer hosts the fight, the other joins with a code
+// The host runs the whole game and sends a snapshot every frame; the guest sends its keys and draws what it's sent.
+const net = { role: null, peer: null, conn: null, code: '', typed: '', status: '', remote: {}, remoteEnterHeld: false, sounds: [], snap: null };
+const MENUS = {
+  menu: ['PLAY', 'SETTINGS'],
+  play: ['VS BOT', 'RANKED', 'CO-OP', 'BACK'],
+  coop: ['HOST', 'JOIN', 'SAME KEYBOARD', 'BACK'],
+  difficulty: ['EASY', 'NORMAL', 'HARD'],
+  ranked: ['FIND MATCH', 'LEADERBOARD', 'BACK'],
+  settings: [],
+};
+const TITLES = { play: 'PLAY', coop: 'CO-OP', difficulty: 'HOW TOUGH IS THE BOT?', settings: 'SETTINGS' };
+const PARENT = { play: 'menu', coop: 'play', difficulty: 'play', ranked: 'play', settings: 'menu', controls: 'settings', board: 'ranked', join: 'coop' };
+const menu = { i: 0, msg: '', msgT: 0 };
+
+// settings, remembered on this computer
+const settings = { sound: true, shake: true };
+try { Object.assign(settings, JSON.parse(localStorage.getItem('trigger-settings') || '{}')); } catch (e) {}
+function saveSettings() { try { localStorage.setItem('trigger-settings', JSON.stringify(settings)); } catch (e) {} }
+function menuList(mode) {
+  if (mode === 'settings') return ['SOUND: ' + (settings.sound ? 'ON' : 'OFF'), 'SCREEN SHAKE: ' + (settings.shake ? 'ON' : 'OFF'), 'MIC: ' + micName(), 'CONTROLS', 'BACK'];
+  return MENUS[mode];
+}
+
+// which microphone voice chat uses: Enter on MIC in settings steps through them
+const mics = { list: [] };
+const cleanName = s => (s || '').toUpperCase().replace(/\(.*?\)/g, '').split('').filter(c => FONT[c]).join('').replace(/\s+/g, ' ').trim().slice(0, 18);
+async function loadMics(ask) {
+  try {
+    let devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+    // browsers hide mic names until you've allowed the mic once, so ask when you actually choose one
+    if (ask && devs.length && !devs[0].label) {
+      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+      s.getTracks().forEach(t => t.stop());
+      devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+    }
+    mics.list = devs.filter(d => d.deviceId !== 'default' && d.deviceId !== 'communications');
+  } catch (e) { mics.list = []; }
+}
+function micName() {
+  if (!settings.micId) return 'DEFAULT';
+  const d = mics.list.find(m => m.deviceId === settings.micId);
+  return cleanName(d ? d.label : settings.micName) || 'MIC';
+}
+async function nextMic() {
+  await loadMics(true);
+  const opts = [{ deviceId: '', label: 'DEFAULT' }].concat(mics.list);
+  const i = opts.findIndex(o => o.deviceId === (settings.micId || ''));
+  const o = opts[(i + 1) % opts.length];
+  settings.micId = o.deviceId; settings.micName = o.label;
+  saveSettings();
+  if (voice.stream) switchMic();
+}
+const micConstraint = () => settings.micId ? { deviceId: { exact: settings.micId } } : true;
+function roomCode() { const a = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; let s = ''; for (let i = 0; i < 4; i++) s += a[Math.random() * a.length | 0]; return s; }
+// if the link to the connection service drops (a tab left in the background can do that), quietly reconnect
+function keepAlive(peer) {
+  peer.on('disconnected', () => { if (net.peer === peer && !peer.destroyed) setTimeout(() => { try { peer.reconnect(); } catch (e) {} }, 1000); });
+}
+function netError(e) {
+  if (e && (e.type === 'network' || e.type === 'server-error' || e.type === 'socket-error' || e.type === 'socket-closed')) return;   // keepAlive handles these
+  net.status = (e && e.type === 'unavailable-id') ? 'THAT CODE IS TAKEN - TRY AGAIN' : (e && e.type === 'peer-unavailable') ? 'NO ROOM WITH THAT CODE' : 'COULD NOT CONNECT'; }
+function hostGame() {
+  if (typeof Peer === 'undefined') { menu.msg = 'ONLINE NEEDS AN INTERNET CONNECTION'; menu.msgT = 180; return; }
+  net.role = 'host'; net.code = roomCode(); net.status = 'OPENING A ROOM...'; game.mode = 'lobby';
+  net.peer = new Peer('trigger-room-' + net.code.toLowerCase());
+  net.peer.on('open', () => { net.status = 'WAITING FOR YOUR FRIEND...'; });
+  net.peer.on('connection', c => { if (net.conn) { c.close(); return; } linkUp(c); });
+  net.peer.on('error', netError);
+  keepAlive(net.peer);
+}
+function joinGame() {
+  if (typeof Peer === 'undefined') { menu.msg = 'ONLINE NEEDS AN INTERNET CONNECTION'; menu.msgT = 180; game.mode = 'coop'; return; }
+  net.role = 'guest'; net.code = net.typed; net.status = 'CONNECTING...'; game.mode = 'lobby';
+  net.peer = new Peer();
+  net.peer.on('open', () => { if (!net.conn) linkUp(net.peer.connect('trigger-room-' + net.code.toLowerCase(), { reliable: false, serialization: 'json' })); });
+  net.peer.on('error', netError);
+  keepAlive(net.peer);
+}
+function linkUp(c) {
+  net.conn = c;
+  c.on('open', () => { net.status = 'CONNECTED'; if (net.role === 'host') openSelect(); });
+  c.on('data', d => {
+    if (net.role === 'host' && d.t === 'i') net.remote = d.i;
+    if (net.role === 'guest' && d.t === 's') net.snap = d;
+    if (d.t === 'c' && !net.ranked) chatLine('FRIEND', d.m);
+    if (d.t === 'q' && net.role === 'host') say(P2, d.n);
+  });
+  c.on('close', () => {
+    // in ranked, walking out of a match you haven't finished counts as a loss for them
+    if (net.ranked && ranked.match && !ranked.reported) { reportResult(ranked.me.id); leaveOnline('YOUR OPPONENT LEFT - YOU WIN'); }
+    else leaveOnline(net.ranked ? 'MATCH OVER' : 'YOUR FRIEND LEFT');
+  });
+  // your friend's voice, when they turn their mic on
+  net.peer.on('call', call => {
+    call.answer();
+    call.on('stream', s => {
+      voice.speaker.srcObject = s;
+      // browsers can refuse to play sound before you've pressed something: if so, try again on your next key press
+      voice.speaker.play().then(() => { voice.blocked = false; }).catch(() => { voice.blocked = true; });
+    });
+    call.on('close', () => { voice.speaker.srcObject = null; });
+  });
+}
+
+// ---------------------------------------------------------------- chat: T to type and V for voice (friend rooms only), 1-4 quick chat (everywhere)
+const chat = { typing: false, draft: '', lines: [] };
+const voice = { stream: null, on: false, asking: false, speaker: new Audio() };
+function chatLine(who, m) {
+  chat.lines.push({ who, m: String(m).toUpperCase().slice(0, 40), life: 420 });
+  if (chat.lines.length > 4) chat.lines.shift();
+}
+function sendChat() {
+  const m = chat.draft.trim();
+  if (m && net.conn && net.conn.open) { net.conn.send({ t: 'c', m }); chatLine('YOU', m); }
+  chat.typing = false; chat.draft = '';
+  enterHeld = true;                                  // the Enter that sent it shouldn't also press anything in the game
+}
+async function toggleVoice() {
+  if (voice.asking || !net.conn || !net.conn.open) return;
+  if (!voice.stream) {
+    voice.asking = true;
+    try {
+      voice.stream = await getMic();
+      voice.call = net.peer.call(net.conn.peer, voice.stream);
+      voice.on = true;
+    } catch (e) { chatLine('GAME', 'NO MIC - CHECK YOUR BROWSER PERMISSION'); }
+    voice.asking = false;
+    return;
+  }
+  voice.on = !voice.on;                              // mute or unmute
+  voice.stream.getAudioTracks().forEach(t => { t.enabled = voice.on; });
+}
+async function getMic() {
+  // the mic picked in settings, or the computer's normal one if that mic has been unplugged
+  try { return await navigator.mediaDevices.getUserMedia({ audio: micConstraint() }); }
+  catch (e) { if (settings.micId) return navigator.mediaDevices.getUserMedia({ audio: true }); throw e; }
+}
+async function switchMic() {
+  // swap the mic mid-call without hanging up
+  try {
+    const s = await getMic(), track = s.getAudioTracks()[0];
+    track.enabled = voice.on;
+    const sender = voice.call && voice.call.peerConnection && voice.call.peerConnection.getSenders().find(x => x.track && x.track.kind === 'audio');
+    if (sender) await sender.replaceTrack(track);
+    voice.stream.getTracks().forEach(t => t.stop());
+    voice.stream = s;
+  } catch (e) { chatLine('GAME', 'COULD NOT SWITCH MIC'); }
+}
+const fighting = () => ['intro', 'fight', 'ko', 'over'].includes(game.mode);
+addEventListener('keydown', e => {
+  if (voice.blocked) voice.speaker.play().then(() => { voice.blocked = false; }).catch(() => {});
+  const friends = net.role && !net.ranked && net.conn && net.conn.open;
+  if (chat.typing) {
+    e.preventDefault();
+    if (e.key === 'Enter') sendChat();
+    else if (e.key === 'Escape') { chat.typing = false; chat.draft = ''; escHeld = true; }
+    else if (e.key === 'Backspace') chat.draft = chat.draft.slice(0, -1);
+    else if (e.key.length === 1 && chat.draft.length < 40 && FONT[e.key.toUpperCase()]) chat.draft += e.key.toUpperCase();
+    return;
+  }
+  // typing is for between fights (character select and the rematch screen), with friends only
+  if (friends && e.code === 'KeyT' && (game.mode === 'select' || game.mode === 'over')) { chat.typing = true; chat.draft = ''; e.preventDefault(); }
+  else if (friends && e.code === 'KeyV') toggleVoice();
+  // quick chat: 1-4 for you (P1), 7-0 for P2 on the same keyboard
+  const quick = { Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3 }[e.code], quick2 = { Digit7: 0, Digit8: 1, Digit9: 2, Digit0: 3 }[e.code];
+  if (!fighting() || (quick === undefined && quick2 === undefined)) return;
+  if (net.role === 'guest') { if (quick !== undefined && net.conn && net.conn.open) net.conn.send({ t: 'q', n: quick }); }
+  else if (quick !== undefined) say(P1, quick);
+  else if (!net.role && !game.cpu) say(P2, quick2);
+});
+function drawChat() {
+  for (const l of chat.lines) if (l.life > 0) l.life--;
+  if (!net.role || net.ranked) return;
+  let y = fighting() ? 40 : 150;
+  for (const l of chat.lines) {
+    if (l.life <= 0) continue;
+    text(l.who + ': ' + l.m, 8, y, 1, '#ffffff');
+    y += 8;
+  }
+  if (chat.typing) text('SAY: ' + chat.draft + (T % 30 < 15 ? '_' : ''), 8, 170, 1, '#ffffff');
+  else if (voice.speaker.srcObject) text(voice.blocked ? 'PRESS ANY KEY TO HEAR YOUR FRIEND' : 'FRIEND\'S MIC IS ON', 8, 170, 1, '#ffffff');
+  if (!chat.typing && game.mode !== 'lobby') {
+    drawMic(304, 164, voice.stream ? (voice.on ? 'on' : 'muted') : 'off');
+    text((fighting() && game.mode !== 'over' ? '' : 'T CHAT  ') + 'V', 298, 170, 1, '#9a9a9a', 'right');
+  }
+}
+// the voice chat icon: a little pixel microphone (grey: off, white with sound waves: on, crossed out: muted)
+const MIC = ['..XXX..', '.XOOOX.', '.XOOOX.', '.XOOOX.', '.XOOOX.', 'X.XXX.X', 'X.....X', '.X...X.', '..XXX..', '...X...', '.XXXXX.'];
+function drawMic(x, y, state) {
+  const fill = state === 'on' ? '#ffffff' : '#a0a0a0';
+  MIC.forEach((row, j) => [...row].forEach((c, i) => {
+    if (c === 'X') { ctx.fillStyle = OUT; ctx.fillRect(x + i, y + j, 1, 1); }
+    else if (c === 'O') { ctx.fillStyle = fill; ctx.fillRect(x + i, y + j, 1, 1); }
+  }));
+  ctx.fillStyle = OUT;
+  if (state === 'on' && T % 40 < 30) {             // sound waves
+    for (const [i, j] of [[8, 1], [9, 2], [9, 3], [9, 4], [8, 5], [10, 0], [11, 1], [11, 2], [11, 3], [11, 4], [11, 5], [10, 6]]) ctx.fillRect(x + i, y + j, 1, 1);
+  }
+  if (state === 'muted') for (let k = 0; k < 11; k++) ctx.fillRect(x + Math.round(k * .7), y + k, 1, 1);    // a slash through it
+}
+
+// quick chat: a speech bubble over your fighter
+const PHRASES = ['GG', 'NICE', 'OOPS', 'REMATCH?'];
+function say(p, n) {
+  if (!p || p.chatCD > 0 || PHRASES[n] === undefined) return;
+  p.bubble = PHRASES[n]; p.bubbleT = 120; p.chatCD = 50;          // a short cooldown, so nobody can flood
+  sfx.click();
+}
+function plain(s, x, y, col) {           // small text with no outline, for inside the bubbles
+  ctx.fillStyle = col;
+  for (let i = 0; i < s.length; i++) {
+    const g = FONT[s[i]];
+    if (g) for (let r = 0; r < 5; r++) for (let c = 0; c < 3; c++) if (g[r][c] === '#') ctx.fillRect(x + i * 4 + c, y + r, 1, 1);
+  }
+}
+function drawBubbles() {
+  for (const p of [P1, P2]) {
+    if (!p || !(p.bubbleT > 0)) continue;
+    const w = p.bubble.length * 4 + 5, x = Math.round(p.x - w / 2), y = Math.round(p.y - 60), cx = Math.round(p.x);
+    ctx.fillStyle = OUT; ctx.fillRect(x - 2, y - 2, w + 4, 13); ctx.fillRect(cx - 3, y + 10, 6, 4);
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(x, y, w, 9); ctx.fillRect(cx - 1, y + 9, 3, 3);
+    plain(p.bubble, x + 3, y + 2, OUT);
+  }
+}
+
+// ---------------------------------------------------------------- the computer opponent
+// It plays by pressing the same buttons a person would, reacting a bit late (later on easy) and sometimes not at all.
+const AI_LEVELS = {
+  EASY:   { react: 26, block: .2, anti: .15, shoot: .15, mix: .45 },
+  NORMAL: { react: 14, block: .5, anti: .45, shoot: .3,  mix: .8 },
+  HARD:   { react: 7,  block: .8, anti: .8,  shoot: .45, mix: 1 },
+};
+const RANGE = { pistol: 80, shotgun: 30, sniper: 150, smg: 55 };   // where each gun likes to fight from
+const ai = { t: 0, move: 0, down: false, tap: null };
+function aiInput(p, o) {
+  const i = {};
+  if (!p || !o) return i;
+  const fwd = p.face > 0 ? 'right' : 'left', back = p.face > 0 ? 'left' : 'right';
+  if (--ai.t <= 0) aiThink(p, o, AI_LEVELS[game.cpu]);
+  if (ai.move > 0) i[fwd] = true; else if (ai.move < 0) i[back] = true;
+  if (ai.down) i.down = true;
+  if (ai.tap) { for (const k of ai.tap) i[k] = true; ai.tap = null; }   // buttons are tapped for one frame
+  return i;
+}
+function aiThink(p, o, L) {
+  ai.t = L.react + (Math.random() * L.react | 0);
+  ai.tap = null; ai.down = false;
+  if (game.mode !== 'fight' || lying(p)) { ai.move = 0; return; }
+  const d = Math.abs(o.x - p.x), want = RANGE[p.f.gun], r = Math.random();
+  // a bullet on its way: duck it or back off
+  const bullet = bullets.find(b => b.owner !== p && Math.sign(b.vx) === Math.sign(p.x - b.x) && Math.abs(b.x - p.x) < 100);
+  if (bullet && r < L.block) { if (Math.random() < .65) { ai.down = true; ai.move = 0; } else ai.move = -1; return; }
+  // an attack coming up close: block it (crouching for a sweep)
+  if (o.state === 'attack' && d < 45 && r < L.block) { ai.move = -1; ai.down = !!(o.atk && o.atk.low); ai.t = Math.min(ai.t, 10); return; }
+  // jumped at: uppercut
+  if (o.state === 'jump' && d < 42 && r < L.anti) { ai.down = true; ai.tap = ['punch']; return; }
+  if (lying(o)) { ai.move = d > want ? 1 : 0; return; }
+  if (d < 24) {
+    if (r < L.mix) {
+      const m = Math.random();
+      if ((o.state === 'block' || o.back) && m < .45) { ai.move = 1; ai.tap = ['punch']; }      // throw someone who just blocks
+      else if (m < .4) ai.tap = ['punch'];
+      else if (m < .65) ai.tap = ['kick'];
+      else if (m < .85) { ai.down = true; ai.tap = ['kick']; }
+      else if (p.f.gun === 'shotgun' && p.ammo > 0) ai.tap = ['shoot'];
+      else ai.move = -1;
+    } else ai.move = -1;
+    return;
+  }
+  // in range with ammo: shoot now and then (it has to last the round)
+  if (p.ammo > 0 && d < want + 40 && d > want * .5 && r < L.shoot && o.state !== 'crouch') { ai.tap = ['shoot']; ai.move = 0; return; }
+  // otherwise get to its favourite distance; out of ammo, get in close
+  const goal = p.ammo > 0 ? want : 18;
+  if (d > goal + 15) { ai.move = 1; if (Math.random() < .1) ai.tap = ['up']; }
+  else if (d < goal - 15 && p.ammo > 0) ai.move = -1;
+  else ai.move = 0;
+}
+function leaveOnline(msg) {
+  if (!net.role && !net.peer) return;
+  const wasRanked = net.ranked;
+  try { if (net.peer) net.peer.destroy(); } catch (e) {}
+  if (voice.stream) voice.stream.getTracks().forEach(t => t.stop());
+  Object.assign(voice, { stream: null, on: false, blocked: false, call: null });
+  voice.speaker.srcObject = null;
+  Object.assign(chat, { typing: false, draft: '', lines: [] });
+  Object.assign(net, { role: null, peer: null, conn: null, remote: {}, snap: null, sounds: [], ranked: false, names: null });
+  game.cpu = null; game.searching = false;
+  game.mode = wasRanked ? 'ranked' : 'title'; menu.i = 0; P1 = P2 = null;
+  if (wasRanked) refreshMe();
+  menu.msg = msg || ''; menu.msgT = msg ? 200 : 0;
+}
+const packPlayer = p => {
+  if (!p) return null;
+  const o = {};
+  for (const k in p) if (!['f', 'held', 'pr', 'pend', 'taps'].includes(k)) o[k] = k === 'atk' ? (p.atk && p.atk.name) : p[k];
+  return o;
+};
+const unpackPlayer = o => o && Object.assign({}, o, { f: FIGHTERS[o.key], atk: o.atk ? ATTACKS[o.atk] : null, held: {}, pr: {}, taps: { f: -99, b: -99 } });
+function sendSnapshot() {
+  if (!net.conn || !net.conn.open) return;
+  net.conn.send({
+    t: 's', T, shake: shakeAmt, sounds: net.sounds, picks, names: net.names,
+    game: Object.assign({}, game, { winner: game.winner ? game.winner.id : null }),
+    sel: sel.map(s => ({ i: s.i, done: s.done })),
+    p1: packPlayer(P1), p2: packPlayer(P2),
+    bullets: bullets.map(b => Object.assign({}, b, { owner: b.owner.id })), parts, pows, flashes,
+  });
+  net.sounds = [];
+}
+function applySnapshot(s) {
+  T = s.T; shakeAmt = settings.shake ? s.shake : 0; picks = s.picks; net.names = s.names;
+  // a ranked match just ended: send in who won
+  if (net.ranked && s.game.mode === 'over' && game.mode !== 'over') reportResult(s.p1.wins >= 2 ? ranked.hostId : ranked.guestId);
+  P1 = unpackPlayer(s.p1); P2 = unpackPlayer(s.p2);
+  Object.assign(game, s.game, { winner: s.game.winner == null ? null : [P1, P2][s.game.winner] });
+  s.sel.forEach((v, k) => Object.assign(sel[k], v));
+  bullets = s.bullets; parts = s.parts; pows = s.pows; flashes = s.flashes;
+  for (const n of s.sounds) if (sfx[n]) sfx[n]();
+}
+function guestTick() {
+  if (net.conn && net.conn.open) net.conn.send({ t: 'i', i: Object.assign(keysHeld(CONTROLS), { enter: !!(KEYS.Enter || KEYS.NumpadEnter) }) });
+  if (net.snap) { const s = net.snap; net.snap = null; net.role = null; applySnapshot(s); net.role = 'guest'; }
+  if (KEYS.Escape && !chat.typing) leaveOnline();
+  else if (net.ranked && game.mode === 'over' && (KEYS.Enter || KEYS.NumpadEnter)) leaveOnline('MATCH OVER');   // no rematches in ranked
+}
+
+// ---------------------------------------------------------------- ranked: random opponents, points and a leaderboard, stored in Supabase
+// Paste your Supabase project's URL and anon key here (SETUP-RANKED.md explains where to find them).
+const SUPABASE_URL = 'https://illevdcnioftzfixznmk.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlsbGV2ZGNuaW9mdHpmaXh6bm1rIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI4ODEzNDMsImV4cCI6MjEwODQ1NzM0M30.69rD3FLXer6yI3_Kn7lZI9TebtmMhOzFOZp7SXZSo6A';
+const RANKS = [['BEGINNER', 0], ['AMATEUR', 100], ['INTERMEDIATE', 250], ['MEDALIST', 450], ['FIGHTER', 700], ['KILLER', 1000], ['DEMON', 1400]];
+const rankOf = pts => RANKS.filter(r => pts >= r[1]).pop()[0];
+const ranked = { db: null, me: null, status: '', board: null, match: null, hostId: null, guestId: null, result: '', searchT: 0, reported: false, lastQueue: 0 };
+async function openRanked() {
+  game.mode = 'ranked'; menu.i = 0; ranked.result = '';
+  if (!SUPABASE_URL || !SUPABASE_KEY || !window.supabase) { ranked.status = 'RANKED ISN\'T SET UP YET - SEE SETUP-RANKED.MD'; return; }
+  if (ranked.me) { if (!ranked.me.named) { game.mode = 'pickname'; ranked.typed = ''; ranked.nameErr = ''; } return; }
+  ranked.status = 'SIGNING IN...';
+  try {
+    if (!ranked.db) ranked.db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    const { data: s } = await ranked.db.auth.getSession();
+    if (!s.session) { const { error } = await ranked.db.auth.signInAnonymously(); if (error) throw error; }
+    const { data, error } = await ranked.db.rpc('ensure_player');      // your player, made the first time
+    if (error) throw error;
+    ranked.me = data; ranked.status = '';
+  } catch (e) { ranked.status = 'COULD NOT REACH THE RANKED SERVER'; return; }
+  if (!ranked.me.named) { game.mode = 'pickname'; ranked.typed = ''; ranked.nameErr = ''; }    // first time: pick a name
+}
+async function saveName() {
+  if (ranked.saving) return;
+  ranked.saving = true; ranked.nameErr = 'SAVING...';
+  const { data, error } = await ranked.db.rpc('set_name', { new_name: ranked.typed });
+  ranked.saving = false;
+  if (error) { ranked.nameErr = (error.message || 'COULD NOT SAVE').toUpperCase(); return; }
+  ranked.me = data; ranked.nameErr = '';
+  goTo('ranked');
+}
+addEventListener('keydown', e => {
+  if (game.mode !== 'pickname') return;
+  if ((/^Key[A-Z]$/.test(e.code) || /^Digit[0-9]$/.test(e.code)) && ranked.typed.length < 12) ranked.typed += e.code.slice(-1);
+  else if (e.code === 'Space' && ranked.typed.length < 12 && ranked.typed && !ranked.typed.endsWith(' ')) ranked.typed += ' ';
+  else if (e.code === 'Backspace') ranked.typed = ranked.typed.slice(0, -1);
+  else return;
+  ranked.nameErr = '';
+  e.preventDefault();
+});
+async function refreshMe() {
+  if (!ranked.db || !ranked.me) return;
+  const { data } = await ranked.db.from('players').select('*').eq('id', ranked.me.id).single();
+  if (data) ranked.me = data;
+}
+function findMatch() {
+  if (!ranked.me) return;
+  if (typeof Peer === 'undefined') { ranked.status = 'ONLINE NEEDS AN INTERNET CONNECTION'; return; }
+  Object.assign(ranked, { match: null, reported: false, result: '', searchT: 0, lastQueue: T });
+  net.ranked = true; net.code = roomCode();
+  net.peer = new Peer('trigger-room-' + net.code.toLowerCase());
+  net.peer.on('open', queueUp);
+  net.peer.on('connection', c => { if (net.conn) { c.close(); return; } c.on('data', d => acceptRanked(c, d)); });
+  net.peer.on('error', e => {
+    if (['peer-unavailable', 'network', 'server-error', 'socket-error', 'socket-closed'].includes(e.type)) return;   // keepAlive reconnects
+    stopSearch(); ranked.status = 'CONNECTION PROBLEM - TRY AGAIN';
+  });
+  keepAlive(net.peer);
+  // fight the computer while you wait
+  game.cpu = 'NORMAL'; game.searching = true;
+  picks = [picks[0], ROSTER[Math.random() * 4 | 0]];
+  startMatch();
+}
+async function queueUp() {
+  ranked.lastQueue = T;
+  if (!net.peer || ranked.match) return;
+  const { data, error } = await ranked.db.rpc('queue_up', { room: net.code });
+  if (error || !data || data.role !== 'guest' || !net.peer) return;
+  // someone was already waiting: go and join them
+  Object.assign(ranked, { match: data.match, hostId: data.host, guestId: ranked.me.id });
+  const c = net.peer.connect('trigger-room-' + data.room.toLowerCase(), { reliable: false, serialization: 'json' });
+  c.on('open', () => c.send({ t: 'm', match: data.match, id: ranked.me.id, name: ranked.me.name }));
+  beginRanked(c, 'guest');
+}
+async function acceptRanked(c, d) {
+  if (d.t !== 'm' || net.conn) return;
+  // make sure this really is a match the server set up with us as host
+  const { data } = await ranked.db.from('matches').select('id, host, guest').eq('id', d.match).single();
+  if (!data || data.host !== ranked.me.id || data.guest !== d.id) { c.close(); return; }
+  Object.assign(ranked, { match: d.match, hostId: ranked.me.id, guestId: d.id });
+  net.names = [ranked.me.name, d.name];
+  beginRanked(c, 'host');
+}
+function beginRanked(c, role) {
+  game.searching = false; game.cpu = null;
+  net.role = role;
+  linkUp(c);
+  ai.t = 0;
+  if (role === 'host') openSelect();
+  else { game.mode = 'lobby'; net.status = 'PLAYER FOUND!'; }
+  sfx.bell();
+}
+function stopSearch() {
+  if (ranked.db) ranked.db.rpc('leave_queue').then(() => {});
+  leaveOnline();
+}
+async function reportResult(winnerId) {
+  if (ranked.reported || !ranked.match || !ranked.db) return;
+  ranked.reported = true;
+  const before = ranked.me.points, played = ranked.me.wins + ranked.me.losses;
+  await ranked.db.rpc('report_result', { match_id: ranked.match, winner: winnerId });
+  // the result counts once both players have sent in the same winner
+  for (let k = 0; k < 8; k++) {
+    await new Promise(r => setTimeout(r, 1500));
+    await refreshMe();
+    if (ranked.me.wins + ranked.me.losses !== played) {
+      const d = ranked.me.points - before;
+      ranked.result = (d > 0 ? '+' + d + ' POINTS' : d < 0 ? d + ' POINTS' : 'NO POINTS LOST') + '  -  ' + rankOf(ranked.me.points);
+      return;
+    }
+  }
+  ranked.result = 'RESULT SENT IN';
+}
+async function openBoard() {
+  game.mode = 'board'; ranked.board = null;
+  const { data } = await ranked.db.from('players').select('name, points').order('points', { ascending: false }).limit(20);
+  ranked.board = data || [];
+}
+addEventListener('beforeunload', () => { if (game.searching && ranked.db) ranked.db.rpc('leave_queue').then(() => {}); });
+addEventListener('keydown', e => {
+  if (game.mode !== 'join') return;
+  if (/^Key[A-Z]$/.test(e.code) && net.typed.length < 4) net.typed += e.code[3];
+  else if (e.code === 'Backspace') net.typed = net.typed.slice(0, -1);
+});
+
+// ---------------------------------------------------------------- the fight
+let P1, P2, bullets = [], parts = [], pows = [], flashes = [];
+let T = 0, stop = 0, shakeAmt = 0;
+const game = { mode: 'title', t: 0, round: 1, timer: 99, banner: '', winner: null };
+
+function makePlayer(id, key, skin) { return { id, key, skin: skin || key, f: FIGHTERS[key], wins: 0, held: {}, in: {}, pr: {}, taps: { f: -99, b: -99 } }; }
+function resetPlayer(p, x, face) {
+  Object.assign(p, { x, y: FLOOR, vx: 0, vy: 0, face, hp: 100, shownHp: 100, hpDelay: 0, ammo: GUNS[p.f.gun].mag,
+    state: 'idle', t: 0, atk: null, hitDone: false, stun: 0, flash: 0, walkT: 0, back: false, bounced: false, koT: 0, sinceFire: 99 });
+}
+let picks = ['rex', 'mako'];
+function startMatch() {
+  P1 = makePlayer(0, picks[0]);
+  P2 = makePlayer(1, picks[1], picks[1] === picks[0] ? picks[1] + '_alt' : picks[1]);
+  game.round = 1;
+  startRound();
+}
+
+// ---------------------------------------------------------------- character select
+const sel = [{ id: 0, i: 0, done: false, held: {} }, { id: 1, i: 1, done: false, held: {} }];
+function openSelect() {
+  game.mode = 'select'; game.t = 0;
+  sel[0].done = sel[1].done = false;
+  sel[0].i = ROSTER.indexOf(picks[0]); sel[1].i = ROSTER.indexOf(picks[1]);
+  if (game.cpu) { sel[1].i = Math.random() * 4 | 0; sel[1].done = true; }      // the computer picks at random
+  for (const s of sel) if (!(game.cpu && s.id === 1)) readInput(s);
+}
+function updateSelect(enterPressed) {
+  for (const s of sel) {
+    if (game.cpu && s.id === 1) continue;
+    readInput(s);
+    const pr = s.pr;
+    if (!s.done) {
+      // the portraits sit in a 2x2 grid
+      if (pr.left || pr.right) { s.i ^= 1; sfx.click(); }
+      if (pr.up || pr.down) { s.i ^= 2; sfx.click(); }
+      if (pr.punch || pr.shoot || (s.id === 0 && enterPressed)) { s.done = true; sfx[FIGHTERS[ROSTER[s.i]].gun](); shake(2); }
+    } else if (pr.kick) { s.done = false; sfx.click(); }
+  }
+  if (sel[0].done && sel[1].done) {
+    if (!game.ready) { game.ready = true; game.t = 0; }
+    if (game.t >= 50) { picks = [ROSTER[sel[0].i], ROSTER[sel[1].i]]; game.ready = false; startMatch(); }
+  } else game.ready = false;
+}
+function startRound() {
+  resetPlayer(P1, 100, 1); resetPlayer(P2, 220, -1);
+  bullets = []; parts = []; pows = []; flashes = [];
+  game.mode = 'intro'; game.t = 0; game.timer = 99; game.winner = null;
+  ai.t = 0;
+  sfx.bell();
+}
+function endRound(winner, banner) {
+  if (game.mode !== 'fight') return;
+  game.mode = 'ko'; game.t = 0; game.banner = banner; game.winner = winner;
+  if (winner) winner.wins++;
+}
+
+const shake = n => { if (settings.shake) shakeAmt = Math.max(shakeAmt, n); };
+const overlap = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+const grounded = p => p.y >= FLOOR;
+function hurt(o) {
+  const low = o.state === 'crouch' || (o.state === 'block' && o.in.down);
+  const h = low ? 24 : 36;
+  return { x: o.x - 7, y: o.y - h, w: 14, h };
+}
+
+function startAttack(p, name) { p.state = 'attack'; p.atk = ATTACKS[name]; p.t = 0; p.hitDone = false; p.vx = 0; sfx.swing(); }
+function startShoot(p) {
+  if (p.ammo <= 0) { sfx.empty(); return; }          // one magazine a round, no reloading: empty means fists and feet
+  p.state = 'shoot'; p.t = 0;
+  if (grounded(p)) p.vx = 0;
+}
+function fire(p) {
+  const g = GUNS[p.f.gun];
+  p.ammo--;
+  const mx = p.x + p.face * g.muzzle, my = p.y - 30;
+  for (let k = 0; k < g.pellets; k++) {
+    const vy = g.pellets > 1 ? (k / (g.pellets - 1) - .5) * g.spread : 0;
+    bullets.push({ x: mx, y: my, vx: p.face * g.speed * (g.pellets > 1 ? 1 - Math.random() * .15 : 1), vy, owner: p, dmg: g.dmg, life: g.life, kb: g.kb, stun: g.stun, big: g.pellets > 1 });
+  }
+  sfx[p.f.gun]();
+  shake(g.shake);
+  flashes.push({ x: mx, y: my, t: 4, face: p.face, big: g.pellets > 1 || p.f.gun === 'sniper' });
+  p.sinceFire = 0;
+  bullets[bullets.length - 1].gun = p.f.gun;
+  parts.push({ x: p.x + p.face * 6, y: my + 2, vx: -p.face * (0.6 + Math.random()), vy: -1.6, g: .2, life: 70, col: '#f2c14e', size: 2, outline: true, bounce: true });
+  if (grounded(p)) p.vx = -p.face * g.recoil;
+}
+
+const lying = p => p.state === 'ko' || p.state === 'down' || p.state === 'getup';   // can't be hit while on the floor
+function knockDown(o, vy, vx) {
+  Object.assign(o, { state: 'down', vy, vx, koT: 0, downT: 0, bounced: false, atk: null });
+  o.y -= 1;
+}
+function onHit(a, o, h) {
+  // a sweep is low: only a crouching block stops it
+  const canBlock = o.back && grounded(o) && ['idle', 'walk', 'crouch', 'block'].includes(o.state) && (!h.low || o.in.down);
+  if (canBlock) {
+    o.state = 'block'; o.stun = Math.round(h.stun * .7); o.vx = h.face * h.kb * .7;
+    if (h.bullet) o.hp = Math.max(1, o.hp - 1);
+    stop = Math.max(stop, 3);
+    spark(h.sx, h.sy, '#9fe8ff', 5);
+    sfx.block();
+    return;
+  }
+  o.hp -= h.dmg; o.hpDelay = 30; o.flash = 6;
+  o.state = 'hit'; o.stun = h.stun; o.vx = h.face * h.kb; o.atk = null;
+  if (!grounded(o)) o.vy = Math.min(o.vy, -2.2);
+  stop = Math.max(stop, h.stop);
+  shake(h.bullet ? 2 : h.dmg > 8 ? 5 : 3);
+  spark(h.sx, h.sy, '#fff27a', h.bullet ? 4 : 8);
+  h.bullet ? sfx.hitB() : sfx.hit();
+  if (o.hp <= 0) {
+    o.hp = 0; o.state = 'ko'; o.vy = -3.6; o.y -= 1; o.vx = h.face * 2.2; o.bounced = false;
+    stop = 18; shake(8); sfx.ko();
+    endRound(a, 'K.O.');
+  } else if (h.launch) knockDown(o, -4.4, h.face * 1.2);         // uppercut: up into the air
+  else if (h.trip) knockDown(o, -1.6, h.face * .6);              // sweep: feet out from under them
+}
+function tryThrow(p, o) {
+  const close = Math.abs(o.x - p.x) < THROW.range && grounded(o) && !lying(o) && o.state !== 'hit';
+  if (!close) return false;
+  o.hp -= THROW.dmg; o.hpDelay = 30; o.flash = 6;
+  stop = Math.max(stop, 10); shake(6); sfx.thud(); sfx.hit();
+  spark(o.x, o.y - 26, '#fff27a', 8);
+  if (o.hp <= 0) {
+    o.hp = 0; o.state = 'ko'; o.vy = -4; o.y -= 1; o.vx = p.face * 2.6; o.bounced = false; o.atk = null;
+    stop = 18; sfx.ko(); endRound(p, 'K.O.');
+  } else knockDown(o, -3.8, p.face * 2.6);
+  return true;
+}
+
+function act(p, o) {
+  const g = GUNS[p.f.gun], i = p.in, pr = p.pr;
+  const fwd = p.face > 0 ? 'right' : 'left', bk = p.face > 0 ? 'left' : 'right';
+  p.back = i[bk] && !i[fwd];
+  if (p.flash > 0) p.flash--;
+  p.sinceFire++;
+  const free = game.mode === 'fight', walk = p.f.walk || 1.25;
+  switch (p.state) {
+    case 'idle': case 'walk': case 'crouch': {
+      if (o.x !== p.x) p.face = o.x > p.x ? 1 : -1;
+      if (!free) { p.vx = 0; p.state = 'idle'; break; }
+      let dash = 0;
+      if (pr[fwd]) { if (T - p.taps.f < 12) dash = 1; p.taps.f = T; }
+      if (pr[bk]) { if (T - p.taps.b < 12) dash = -1; p.taps.b = T; }
+      if (pr.up) {
+        p.vy = -4.4; p.y -= 1; p.vx = (i[fwd] ? 1.5 : i[bk] ? -1.3 : 0) * p.face;
+        p.state = 'jump'; p.atk = null; sfx.jump(); dust(p);
+      } else if (dash) { p.state = 'dash'; p.t = 0; p.dashDir = dash; p.taps.f = p.taps.b = -99; sfx.dash(); dust(p); }
+      else if (pr.punch && i.down) startAttack(p, 'upper');
+      else if (pr.punch && i[fwd] && Math.abs(o.x - p.x) < THROW.range) { p.state = 'throw'; p.t = 0; p.vx = 0; p.caught = false; sfx.swing(); }
+      else if (pr.punch) startAttack(p, 'punch');
+      else if (pr.kick && i.down) startAttack(p, 'sweep');
+      else if (pr.kick) startAttack(p, 'kick');
+      else if (pr.shoot && !i.down) startShoot(p);
+      else if (i.down) { p.state = 'crouch'; p.vx = 0; }
+      else if (i[fwd]) { p.state = 'walk'; p.vx = walk * p.face; }
+      else if (i[bk]) { p.state = 'walk'; p.vx = -walk * .76 * p.face; }
+      else { p.state = 'idle'; p.vx = 0; }
+      break;
+    }
+    case 'jump':
+      if (free && !p.atk && (pr.kick || pr.punch)) { p.atk = ATTACKS.jkick; p.hitDone = false; sfx.swing(); }
+      else if (free && !p.atk && pr.shoot) startShoot(p);
+      break;
+    case 'attack': {
+      p.t++;
+      const a = p.atk;
+      if (p.t >= a.start + a.active + a.rec) { p.state = 'idle'; p.atk = null; }
+      break;
+    }
+    case 'shoot': {
+      p.t++;
+      const burst = g.burst || 1, gap = g.gap || 1, bt = p.t - g.startup;   // the SMG fires three shots a press
+      if (bt >= 0 && bt % gap === 0 && bt / gap < burst && p.ammo > 0) fire(p);
+      if (grounded(p)) p.vx *= .8;
+      if (p.t >= g.startup + (burst - 1) * gap + g.recover) p.state = grounded(p) ? 'idle' : 'jump';
+      break;
+    }
+    case 'hit': case 'block':
+      p.stun--;
+      if (p.stun <= 0 && grounded(p)) p.state = 'idle';
+      break;
+    case 'dash':
+      p.t++;
+      p.vx = p.dashDir * p.face * (p.dashDir > 0 ? 3.4 : 2.8) * (p.f.dash || 1) * (1 - p.t / 16);
+      if (p.t >= 12) { p.state = 'idle'; p.vx = 0; }
+      break;
+    case 'throw':
+      p.t++;
+      if (p.t === THROW.start) p.caught = tryThrow(p, o);
+      if (p.t >= (p.caught ? THROW.length : THROW.whiff)) p.state = 'idle';
+      break;
+    case 'down':
+      // knocked down: fall, bounce, lie there a moment, then get up
+      p.koT++;
+      if (p.bounced && grounded(p) && ++p.downT >= 30) { p.state = 'getup'; p.t = 0; p.vx = 0; }
+      break;
+    case 'getup':
+      if (++p.t >= 14) p.state = 'idle';
+      break;
+    case 'ko':
+      p.koT++;
+      break;
+  }
+}
+
+function physics(p) {
+  const air = p.y < FLOOR || p.vy < 0;
+  if (air) p.vy += .24;
+  p.x += p.vx; p.y += p.vy;
+  if (p.y >= FLOOR) {
+    p.y = FLOOR;
+    const v = p.vy;
+    p.vy = 0;
+    if (air && v > 0) land(p);
+  }
+  if ((p.state === 'hit' || p.state === 'block' || lying(p)) && grounded(p)) p.vx *= .82;
+  const edge = lying(p) ? 44 : 14;                   // a fighter on the floor lies down: keep the whole body on screen
+  p.x = Math.max(edge, Math.min(W - edge, p.x));
+  if (p.state === 'walk') p.walkT += Math.abs(p.vx);
+}
+function land(p) {
+  if (p.state === 'jump') { p.state = 'idle'; p.atk = null; p.vx = 0; dust(p); sfx.land(); }
+  else if ((p.state === 'ko' || p.state === 'down') && !p.bounced) { p.bounced = true; p.vy = -1.5; shake(4); sfx.thud(); dust(p); }
+}
+function separate() {
+  if (lying(P1) || lying(P2) || Math.abs(P1.y - P2.y) >= 30) return;
+  const dx = P2.x - P1.x, min = 16;
+  if (Math.abs(dx) >= min) return;
+  const dir = dx > 0 ? 1 : dx < 0 ? -1 : (P1.face > 0 ? 1 : -1);
+  const push = (min - Math.abs(dx)) / 2;
+  P1.x -= dir * push; P2.x += dir * push;
+  for (const p of [P1, P2]) p.x = Math.max(14, Math.min(W - 14, p.x));
+  if (Math.abs(P2.x - P1.x) < min) {                         // squeezed against a wall: the other one gives way
+    if (P1.x <= 14 || P2.x <= 14) { const l = P1.x < P2.x ? P1 : P2, r = l === P1 ? P2 : P1; r.x = l.x + min; }
+    else { const r = P1.x > P2.x ? P1 : P2, l = r === P1 ? P2 : P1; l.x = r.x - min; }
+  }
+}
+function activeBox(p) {
+  if (p.state === 'attack') { const a = p.atk; if (p.t >= a.start && p.t < a.start + a.active) return a; }
+  if (p.state === 'jump' && p.atk) return p.atk;
+  return null;
+}
+function melee(p, o) {
+  const a = activeBox(p);
+  if (!a || p.hitDone || lying(o)) return;
+  const box = { x: p.face > 0 ? p.x + a.x : p.x - a.x - a.w, y: p.y + a.y, w: a.w, h: a.h };
+  if (overlap(box, hurt(o))) {
+    p.hitDone = true;
+    onHit(p, o, { dmg: Math.round(a.dmg * (p.f.power || 1)), stun: a.stun, kb: a.kb, stop: a.stop, face: p.face, low: a.low, launch: a.launch, trip: a.trip, sx: o.x - p.face * 6, sy: p.y + a.y + a.h / 2 });
+  }
+}
+function updateBullets() {
+  for (const b of bullets) {
+    b.x += b.vx; b.y += b.vy; b.life--;
+    const o = b.owner === P1 ? P2 : P1;
+    if (!lying(o) && overlap({ x: b.x - 2, y: b.y - 1, w: 4, h: 2 }, hurt(o))) {
+      onHit(b.owner, o, { dmg: b.dmg, stun: b.stun, kb: b.kb, stop: 3, bullet: true, face: Math.sign(b.vx), sx: b.x, sy: b.y });
+      b.life = 0;
+    }
+    if (b.x < -8 || b.x > W + 8) b.life = 0;
+  }
+  bullets = bullets.filter(b => b.life > 0);
+}
+function spark(x, y, col, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, s = 1 + Math.random() * 2.5;
+    parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - .5, g: .15, life: 10 + Math.random() * 8 | 0, col, size: 2, outline: true });
+  }
+  pows.push({ x, y, t: 0, col });
+}
+function dust(p) {
+  for (let i = 0; i < 5; i++)
+    parts.push({ x: p.x + Math.random() * 12 - 6, y: FLOOR - 1, vx: (Math.random() - .5) * 1.2, vy: -Math.random() * .6, g: -.01, life: 14 + Math.random() * 8 | 0, col: '#cbb8d8', size: 2 });
+}
+function updateParts() {
+  for (const q of parts) {
+    q.x += q.vx; q.y += q.vy; q.vy += q.g; q.life--;
+    if (q.bounce && q.y > FLOOR - 1 && q.vy > 0) { q.y = FLOOR - 1; q.vy *= -.4; q.vx *= .6; }
+  }
+  parts = parts.filter(q => q.life > 0);
+  for (const w of pows) w.t++;
+  pows = pows.filter(w => w.t < 6);
+  for (const f of flashes) f.t--;
+  flashes = flashes.filter(f => f.t > 0);
+}
+
+function step() {
+  T++;
+  const enter = KEYS.Enter || KEYS.NumpadEnter || KEYS.Space;
+  const enterPressed = enter && !enterHeld && !chat.typing;
+  enterHeld = enter;
+  const escPressed = KEYS.Escape && !escHeld && !chat.typing;
+  escHeld = KEYS.Escape;
+  shakeAmt *= .85;
+  if (shakeAmt < .3) shakeAmt = 0;
+
+  if (menu.msgT > 0) menu.msgT--;
+  if (net.role === 'guest') { guestTick(); return; }
+  if (game.mode === 'title') { if (enterPressed) { game.mode = 'menu'; menu.i = 0; } return; }
+  const list = menuList(game.mode);
+  if (list) {
+    const up = KEYS.KeyW || KEYS.ArrowUp, down = KEYS.KeyS || KEYS.ArrowDown;
+    if (up && !menu.upHeld) { menu.i = (menu.i + list.length - 1) % list.length; sfx.click(); }
+    if (down && !menu.downHeld) { menu.i = (menu.i + 1) % list.length; sfx.click(); }
+    menu.upHeld = up; menu.downHeld = down;
+    if (escPressed) goBack();
+    else if (enterPressed) choose(list[menu.i]);
+    return;
+  }
+  if (game.mode === 'board' || game.mode === 'controls') { if (escPressed || enterPressed) goBack(); return; }
+  if (game.mode === 'pickname') {
+    if (escPressed) goTo('play', 1);
+    else if (KEYS.Enter && !menu.enterHeld && ranked.typed.trim().length >= 3) saveName();    // Enter only (Space types a space)
+    menu.enterHeld = KEYS.Enter;
+    return;
+  }
+  if (game.mode === 'join') {
+    if (escPressed) goBack();
+    else if (enterPressed && net.typed.length === 4) joinGame();
+    return;
+  }
+  if (game.mode === 'lobby') { if (escPressed) leaveOnline(); return; }
+  if (game.mode === 'select') {
+    game.t++;
+    if (escPressed) {
+      if (net.role) leaveOnline();
+      else if (game.cpu) goTo('difficulty', MENUS.difficulty.indexOf(game.cpu));
+      else goTo('coop', 2);
+    }
+    else updateSelect(enterPressed);
+    return;
+  }
+  if (escPressed) {
+    if (game.searching) stopSearch();                   // stop looking for a ranked opponent
+    else if (net.ranked) leaveOnline('YOU LEFT - THAT COUNTS AS A LOSS');
+    else openSelect();
+    return;
+  }
+  if (game.searching) {
+    ranked.searchT++;
+    if (T - ranked.lastQueue > 600 && net.peer && net.peer.open) queueUp();    // check the queue again every 10 seconds
+  }
+  for (const p of [P1, P2]) {                           // presses made during a hit freeze count once it ends
+    readInput(p);
+    p.pend = p.pend || {};
+    for (const k in p.pr) {
+      if (stop > 0) { if (p.pr[k]) p.pend[k] = true; }
+      else if (p.pend[k]) { p.pr[k] = true; p.pend[k] = false; }
+    }
+  }
+  game.t++;
+
+  const slow = game.mode === 'ko' && game.t < 45 && T % 3 !== 0;     // the knockout plays in slow motion
+  if (stop > 0) stop--;
+  else if (!slow) {
+    act(P1, P2); act(P2, P1);
+    physics(P1); physics(P2);
+    separate();
+    melee(P1, P2); melee(P2, P1);
+    updateBullets();
+    updateParts();
+  }
+  for (const p of [P1, P2]) {
+    if (p.hpDelay > 0) p.hpDelay--;
+    else if (p.shownHp > p.hp) p.shownHp = Math.max(p.hp, p.shownHp - .8);
+    if (p.bubbleT > 0) p.bubbleT--;
+    if (p.chatCD > 0) p.chatCD--;
+  }
+
+  if (game.mode === 'intro' && game.t >= 80) { game.mode = 'fight'; game.t = 0; }
+  else if (game.mode === 'fight') {
+    if (game.t % 60 === 0 && game.timer > 0) {
+      game.timer--;
+      if (game.timer === 0) endRound(P1.hp > P2.hp ? P1 : P2.hp > P1.hp ? P2 : null, 'TIME');
+    }
+  } else if (game.mode === 'ko' && game.t >= 170) {
+    if (P1.wins >= 2 || P2.wins >= 2) {
+      if (game.searching) { picks = [picks[0], ROSTER[Math.random() * 4 | 0]]; startMatch(); return; }   // still waiting: another warm-up
+      game.mode = 'over'; game.t = 0;
+      if (net.ranked) reportResult(P1.wins >= 2 ? ranked.hostId : ranked.guestId);
+      if (game.cpu) say(P2, 0);                         // the computer is a good sport: GG
+    } else { game.round++; startRound(); }
+  } else if (game.mode === 'over') {
+    const re = !!net.remote.enter, rePressed = re && !net.remoteEnterHeld;     // either player can call the rematch
+    net.remoteEnterHeld = re;
+    if (net.ranked) { if (enterPressed) leaveOnline('MATCH OVER'); }           // no rematches in ranked
+    else if (enterPressed || rePressed) startMatch();
+  }
+}
+function goTo(mode, i = 0) { game.mode = mode; menu.i = i; }
+function goBack() {
+  // back to the menu this one came from, with the cursor on the option that led here
+  const from = game.mode, to = PARENT[from] || 'title';
+  const came = { play: 'PLAY', settings: 'SETTINGS', coop: 'CO-OP', difficulty: 'VS BOT', ranked: 'RANKED', controls: 'CONTROLS', board: 'LEADERBOARD', join: 'JOIN' }[from];
+  const list = menuList(to);
+  goTo(to, list ? Math.max(0, list.findIndex(s => s === came)) : 0);
+}
+function choose(item) {
+  sfx.click();
+  if (item === 'PLAY') goTo('play');
+  else if (item === 'SETTINGS') { goTo('settings'); loadMics(false); }
+  else if (item.startsWith('MIC:')) nextMic();
+  else if (item === 'VS BOT') goTo('difficulty', 1);
+  else if (MENUS.difficulty.includes(item)) { game.cpu = item; openSelect(); }
+  else if (item === 'RANKED') openRanked();
+  else if (item === 'CO-OP') goTo('coop');
+  else if (item === 'HOST') { game.cpu = null; hostGame(); }
+  else if (item === 'JOIN') { game.cpu = null; game.mode = 'join'; net.typed = ''; }
+  else if (item === 'SAME KEYBOARD') { game.cpu = null; openSelect(); }
+  else if (item === 'FIND MATCH') findMatch();
+  else if (item === 'LEADERBOARD') { if (ranked.me) openBoard(); }
+  else if (item.startsWith('SOUND')) { settings.sound = !settings.sound; saveSettings(); }
+  else if (item.startsWith('SCREEN SHAKE')) { settings.shake = !settings.shake; saveSettings(); }
+  else if (item === 'CONTROLS') goTo('controls');
+  else if (item === 'BACK') goBack();
+}
+
+// ---------------------------------------------------------------- drawing
+function frameName(p) {
+  switch (p.state) {
+    case 'idle': return Math.floor(T / 24) % 2 ? 'idle1' : 'idle0';
+    case 'walk': return 'walk' + (Math.floor(p.walkT / 5) % 4);
+    case 'crouch': return 'crouch';
+    case 'jump': return p.atk ? 'jkick' : p.vy < 0 ? 'jump' : 'fall';
+    case 'attack': { const a = p.atk; return a.name + (p.t >= a.start && p.t < a.start + a.active + (a.rec >> 1) ? '1' : '0'); }
+    case 'shoot': return p.sinceFire < 4 ? 'shoot1' : 'shoot0';
+    case 'block': return p.in.down ? 'cblock' : 'block';
+    case 'dash': return 'dash';
+    case 'throw': return p.caught && p.t >= 6 ? 'throw1' : 'throw0';
+    case 'down': case 'ko':
+      if (p.bounced) return 'lie';
+      return p.koT < 8 ? 'fall0' : 'fall1';
+    case 'getup': return p.t < 7 ? 'sit' : 'crouch';
+    default: return 'hit';
+  }
+}
+function drawFighter(p, name) {
+  const set = p.flash > 0 ? SPR[p.skin].flash : SPR[p.skin].img;
+  const img = set[name || frameName(p)];
+  const lift = Math.max(0, FLOOR - p.y);
+  if (game.mode !== 'select') {
+    ctx.fillStyle = 'rgba(20,10,30,.45)';
+    const sw = Math.max(6, 14 - lift / 6);
+    ctx.fillRect(Math.round(p.x - sw), FLOOR, Math.round(sw * 2), 2);
+  }
+  ctx.save();
+  ctx.translate(Math.round(p.x), Math.round(p.y));
+  if (p.face < 0) ctx.scale(-1, 1);
+  ctx.drawImage(img, -GX, -GY);
+  ctx.restore();
+}
+function drawWorld() {
+  ctx.drawImage(BG, 0, 0);
+  if (!P1) return;
+  const order = (P1.state === 'attack' || P1.state === 'shoot') ? [P2, P1] : [P1, P2];
+  for (const p of order) drawFighter(p);
+  drawBubbles();
+  for (const b of bullets) {
+    ctx.fillStyle = OUT;
+    if (b.big) { ctx.fillRect(Math.round(b.x) - 2, Math.round(b.y) - 2, 4, 4); ctx.fillStyle = '#ffe680'; ctx.fillRect(Math.round(b.x) - 1, Math.round(b.y) - 1, 2, 2); }
+    else if (b.gun === 'sniper') {
+      ctx.fillRect(Math.round(b.x) - 6, Math.round(b.y) - 2, 12, 4);
+      ctx.fillStyle = '#ffffff'; ctx.fillRect(Math.round(b.x) - 5, Math.round(b.y) - 1, 10, 2);
+      ctx.fillStyle = 'rgba(200,240,255,.4)'; ctx.fillRect(Math.round(b.x - b.vx * 3) - 10, Math.round(b.y) - 1, 20, 1);
+    } else {
+      ctx.fillRect(Math.round(b.x) - 3, Math.round(b.y) - 2, 7, 4);
+      ctx.fillStyle = '#fff27a'; ctx.fillRect(Math.round(b.x) - 2, Math.round(b.y) - 1, 5, 2);
+      ctx.fillStyle = 'rgba(255,240,150,.35)'; ctx.fillRect(Math.round(b.x - b.vx * 2) - 4, Math.round(b.y) - 1, 6, 1);
+    }
+  }
+  for (const f of flashes) {
+    const s = f.big ? 2 : 1;
+    ctx.fillStyle = OUT; ctx.fillRect(f.x - 1 * s + (f.face > 0 ? 0 : -7 * s), f.y - 3 * s, 9 * s, 6 * s);
+    ctx.fillStyle = '#ffb347'; ctx.fillRect(f.x + (f.face > 0 ? 0 : -6 * s), f.y - 2 * s, 7 * s, 4 * s);
+    ctx.fillStyle = '#fff6c8'; ctx.fillRect(f.x + (f.face > 0 ? 0 : -3 * s), f.y - 1 * s, 4 * s, 2 * s);
+  }
+  for (const q of parts) {
+    if (q.outline) { ctx.fillStyle = OUT; ctx.fillRect(Math.round(q.x) - 1, Math.round(q.y) - 1, q.size + 2, q.size + 2); }
+    ctx.fillStyle = q.col; ctx.fillRect(Math.round(q.x), Math.round(q.y), q.size, q.size);
+  }
+  for (const w of pows) {
+    const r = 3 + w.t * 2;
+    ctx.fillStyle = w.t < 2 ? '#ffffff' : w.col;
+    for (let k = 0; k < 8; k++) {
+      const a = k * Math.PI / 4;
+      ctx.fillRect(Math.round(w.x + Math.cos(a) * r) - 1, Math.round(w.y + Math.sin(a) * r) - 1, 2, 2);
+    }
+    if (w.t < 2) ctx.fillRect(Math.round(w.x) - 3, Math.round(w.y) - 3, 6, 6);
+  }
+}
+function bar(x, y, w, h, p, right) {
+  ctx.fillStyle = OUT; ctx.fillRect(x - 2, y - 2, w + 4, h + 4);
+  ctx.fillStyle = '#3a1630'; ctx.fillRect(x, y, w, h);
+  const sw = Math.round(w * p.shownHp / 100), hw = Math.round(w * p.hp / 100);
+  ctx.fillStyle = '#ff4d4d'; ctx.fillRect(right ? x + w - sw : x, y, sw, h);
+  ctx.fillStyle = p.hp < 30 && T % 20 < 10 ? '#ff9a3d' : '#ffd93d'; ctx.fillRect(right ? x + w - hw : x, y, hw, h);
+  ctx.fillStyle = '#fff6b0'; ctx.fillRect(right ? x + w - hw : x, y, hw, 1);
+}
+function drawHud() {
+  bar(10, 8, 128, 7, P1, false);
+  bar(182, 8, 128, 7, P2, true);
+  ctx.fillStyle = OUT; ctx.fillRect(148, 4, 24, 16);
+  ctx.fillStyle = '#2a1745'; ctx.fillRect(149, 5, 22, 14);
+  text(String(game.timer).padStart(2, '0'), 160, 7, 2, '#ffffff', 'center');
+  // names: the gun, plus who's who (ranked shows player names instead)
+  const n1 = net.names ? net.names[0] : P1.f.name, n2 = net.names ? net.names[1] : P2.f.name;
+  text(n1 + (net.role === 'host' ? ' - YOU' : ''), 10, 19, 1, '#ffffff');
+  text((net.role === 'guest' ? 'YOU - ' : game.cpu ? 'CPU - ' : '') + n2, 310, 19, 1, '#ffffff', 'right');
+  if (game.searching) {
+    const s = Math.floor(ranked.searchT / 60);
+    text('FINDING A RANKED OPPONENT ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0') + '  -  ESC TO STOP', 160, 44, 1, '#ffffff', 'center');
+  }
+  for (const [p, x0, dir] of [[P1, 10, 1], [P2, 310, -1]]) {
+    const g = GUNS[p.f.gun];
+    const step = g.mag > 8 ? 4 : 5;
+    for (let k = 0; k < g.mag; k++) {
+      const x = dir > 0 ? x0 + k * step : x0 - 3 - k * step;
+      ctx.fillStyle = OUT; ctx.fillRect(x - 1, 26, 5, 7);
+      ctx.fillStyle = k < p.ammo ? '#f2c14e' : '#4a3a5a'; ctx.fillRect(x, 27, 3, 5);
+      if (k < p.ammo) { ctx.fillStyle = '#ff8a5a'; ctx.fillRect(x, 27, 3, 1); }
+    }
+    if (p.ammo === 0 && T % 30 < 15) {
+      text('EMPTY', dir > 0 ? x0 + g.mag * step + 3 : x0 - g.mag * step - 3, 27, 1, '#ff4d4d', dir > 0 ? 'left' : 'right');
+    }
+    for (let k = 0; k < 2; k++) {                              // round wins
+      const x = dir > 0 ? 138 - 6 - k * 7 : 182 + 2 + k * 7;
+      ctx.fillStyle = OUT; ctx.fillRect(x - 1, 18, 6, 6);
+      ctx.fillStyle = k < p.wins ? '#ffd93d' : '#3a1630'; ctx.fillRect(x, 19, 4, 4);
+    }
+  }
+}
+function drawBanners() {
+  const gt = game.t;
+  if (game.mode === 'intro') {
+    const last = P1.wins === 1 && P2.wins === 1;
+    if (gt < 50) text(last ? 'FINAL ROUND' : 'ROUND ' + game.round, 160, 66, 4, '#ffffff', 'center', '#c0305a');
+    else text('FIGHT!', 160, 62, 6, '#ffd93d', 'center', '#e8463c');
+  } else if (game.mode === 'fight' && gt < 20) {
+    text('FIGHT!', 160, 62, 6, '#ffd93d', 'center', '#e8463c');
+  } else if (game.mode === 'ko' && gt < 140) {
+    text(game.banner, 160, 60, 7, '#ffffff', 'center', '#e8463c');
+  } else if (game.mode === 'over') {
+    const p1won = P1.wins >= 2;
+    const label = game.cpu ? (p1won ? 'YOU WIN!' : 'CPU WINS!')
+      : net.role ? (p1won === (net.role === 'host') ? 'YOU WIN!' : 'YOU LOSE')
+      : (p1won ? 'P1 WINS!' : 'P2 WINS!');
+    text(label, 160, 56, 5, '#ffd93d', 'center', '#e8463c');
+    if (net.ranked) {
+      text(ranked.result || 'SAVING THE RESULT...', 160, 90, 2, '#ffffff', 'center');
+      if (T % 50 < 34) text('ENTER - BACK TO RANKED', 160, 110, 1, '#ffffff', 'center');
+    } else if (T % 50 < 34) text('ENTER - REMATCH     ESC - NEW FIGHTERS', 160, 92, 1, '#ffffff', 'center');
+  }
+}
+function drawTitle() {
+  ctx.drawImage(BG, 0, 0);
+  text('TRIGGER', 160, 50, 8, '#ffd93d', 'center', '#e8463c');
+  if (T % 50 < 34) text('PRESS ENTER', 160, 108, 2, '#ffffff', 'center');
+}
+const SELECT_BG = { rex: '#d8d8d8', mako: '#d8d8d8', vex: '#d8d8d8', bolt: '#d8d8d8' };
+const selShow = [makePlayer(0, 'rex'), makePlayer(1, 'mako')];
+function drawSelect() {
+  ctx.drawImage(BG, 0, 0);
+  ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.fillRect(0, 0, W, H);
+  text('CHOOSE YOUR FIGHTER', 160, 8, 2, '#ffd93d', 'center', '#e8463c');
+  // the portraits: a 2x2 grid of faces, drawn at double size
+  const gx = 116, gy = 36, bs = 40, gap = 6;
+  ROSTER.forEach((k, i) => {
+    const x = gx + (i & 1) * (bs + gap), y = gy + (i >> 1) * (bs + gap);
+    ctx.fillStyle = OUT; ctx.fillRect(x - 2, y - 2, bs + 4, bs + 4);
+    ctx.fillStyle = SELECT_BG[k]; ctx.fillRect(x, y, bs, bs);
+    ctx.fillStyle = shade(SELECT_BG[k], 1.3); ctx.fillRect(x, y, bs, 3);
+    ctx.drawImage(SPR[k].img.shoot0, GX - 7, 4, bs, bs, x, y, bs, bs);      // everyone looks alike, so show the gun
+    ctx.fillStyle = OUT; ctx.fillRect(x - 2, y - 2, bs + 4, 2); ctx.fillRect(x - 2, y + bs, bs + 4, 2); ctx.fillRect(x - 2, y - 2, 2, bs + 4); ctx.fillRect(x + bs, y - 2, 2, bs + 4);
+  });
+  // cursors
+  for (const s of sel) {
+    const x = gx + (s.i & 1) * (bs + gap), y = gy + (s.i >> 1) * (bs + gap);
+    const col = s.id === 0 ? '#ff4d4d' : '#4da6ff', inset = (sel[0].i === sel[1].i && s.id === 1) ? 3 : 0;
+    const blink = s.done || T % 30 < 22;
+    if (blink) {
+      ctx.fillStyle = col;
+      ctx.fillRect(x - 3 + inset, y - 3 + inset, bs + 6 - inset * 2, 2); ctx.fillRect(x - 3 + inset, y + bs + 1 - inset, bs + 6 - inset * 2, 2);
+      ctx.fillRect(x - 3 + inset, y - 3 + inset, 2, bs + 6 - inset * 2); ctx.fillRect(x + bs + 1 - inset, y - 3 + inset, 2, bs + 6 - inset * 2);
+    }
+    text(s.id === 0 ? '1P' : '2P', s.id === 0 ? x + 2 : x + bs - 2, s.id === 0 ? y + 2 : y + bs - 7, 1, col, s.id === 0 ? 'left' : 'right');
+  }
+  // the chosen fighters, big, either side
+  for (const s of sel) {
+    const k = ROSTER[s.i], f = FIGHTERS[k], show = selShow[s.id];
+    const skin = s.id === 1 && sel[0].i === sel[1].i ? k + '_alt' : k;
+    if (show.key !== k || show.skin !== skin) { Object.assign(show, makePlayer(s.id, k, skin)); resetPlayer(show, 0, s.id === 0 ? 1 : -1); }
+    // drawn at the same pixel size as everything else, so it's just as sharp
+    const cx = s.id === 0 ? 50 : 270;
+    show.x = cx; show.y = 112;
+    drawFighter(show, s.done && game.t % 40 < 4 && !game.ready ? 'shoot1' : 'shoot0');
+    text(f.name, cx, 122, 2, '#ffffff', 'center');
+    text(f.desc, cx, 136, 1, '#ffffff', 'center');
+    if (s.done) text('READY!', cx, 22, 2, '#ffd93d', 'center');
+  }
+  if (game.ready) text('GET READY!', 160, 130, 1, '#ffd93d', 'center');
+  else { text('PUNCH - LOCK IN', 160, 130, 1, '#ffffff', 'center'); text('KICK - CHANGE', 160, 139, 1, '#ffffff', 'center'); }
+}
+function present() {
+  sctx.imageSmoothingEnabled = false;
+  const ox = Math.round((Math.random() * 2 - 1) * shakeAmt) * S, oy = Math.round((Math.random() * 2 - 1) * shakeAmt) * S;
+  sctx.fillStyle = '#000000'; sctx.fillRect(0, 0, screen.width, screen.height);
+  sctx.drawImage(low, ox, oy, W * S, H * S);
+}
+// black and white: every frame is turned into a few hard greys. Blood is drawn afterwards, so it stays red.
+const GREYS = [14, 52, 100, 160, 215, 255];
+const MONO = new Uint8Array(256);
+for (let v = 0; v < 256; v++) {
+  const c = Math.max(0, Math.min(255, (v - 128) * 1.3 + 128));
+  let best = 0;
+  for (const g of GREYS) if (Math.abs(g - c) < Math.abs(best - c)) best = g;
+  MONO[v] = best;
+}
+function mono() {
+  const img = ctx.getImageData(0, 0, W, H), d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const g = MONO[(d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8];
+    d[i] = d[i + 1] = d[i + 2] = g;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+function drawMenu() {
+  ctx.drawImage(BG, 0, 0);
+  text('TRIGGER', 160, 20, 5, '#ffffff', 'center');
+  const list = menuList(game.mode);
+  if (list) {
+    const gap = 18, top = game.mode === 'ranked' ? 92 : Math.round(104 - list.length * gap / 2);
+    if (TITLES[game.mode]) text(TITLES[game.mode], 160, 48, 1, '#ffffff', 'center');
+    if (game.mode === 'ranked') {
+      if (ranked.me) {
+        text(ranked.me.name, 160, 46, 2, '#ffffff', 'center');
+        text(rankOf(ranked.me.points) + '  -  ' + ranked.me.points + ' POINTS', 160, 62, 1, '#ffffff', 'center');
+        text(ranked.me.wins + ' WINS  ' + ranked.me.losses + ' LOSSES', 160, 72, 1, '#9a9a9a', 'center');
+      }
+      if (ranked.status) text(ranked.status, 160, 56, 1, '#ffffff', 'center');
+    }
+    list.forEach((s, k) => {
+      const on = k === menu.i;
+      text((on ? '> ' : '  ') + s + (on ? ' <' : '  '), 160, top + k * gap, 2, on ? '#ffffff' : '#9a9a9a', 'center');
+    });
+    text('W S TO CHOOSE - ENTER TO PICK - ESC TO GO BACK', 160, 150, 1, '#ffffff', 'center');
+  } else if (game.mode === 'pickname') {
+    text('PICK YOUR RANKED NAME', 160, 52, 1, '#ffffff', 'center');
+    text(ranked.typed + (T % 30 < 15 ? '_' : ' '), 160, 70, 3, '#ffffff', 'center');
+    text('3-12 LETTERS OR NUMBERS', 160, 100, 1, '#c8c8c8', 'center');
+    text('EVERYONE SEES IT - YOU CAN\'T CHANGE IT LATER', 160, 110, 1, '#c8c8c8', 'center');
+    if (ranked.nameErr) text(ranked.nameErr, 160, 124, 1, '#ffffff', 'center');
+    text(ranked.typed.trim().length >= 3 ? 'ENTER TO SAVE - ESC TO GO BACK' : 'ESC TO GO BACK', 160, 150, 1, '#9a9a9a', 'center');
+  } else if (game.mode === 'controls') {
+    const lines = [
+      ['P1', 'WASD MOVE  F PUNCH  G KICK  H SHOOT'],
+      ['P2', 'ARROWS  J PUNCH  K KICK  L SHOOT'],
+      ['', 'TAP FORWARD TWICE TO DASH'],
+      ['', 'HOLD BACK TO BLOCK - DOWN+BACK FOR LOW'],
+      ['', 'DOWN+PUNCH UPPERCUT   DOWN+KICK SWEEP'],
+      ['', 'CLOSE + FORWARD + PUNCH THROW'],
+      ['', '1-4 QUICK CHAT (P2: 7-0)'],
+      ['', 'ONLINE WITH FRIENDS: T CHAT  V VOICE'],
+    ];
+    text('CONTROLS', 160, 52, 1, '#ffffff', 'center');
+    lines.forEach(([who, s], k) => text((who ? who + '  ' : '') + s, 160, 66 + k * 10, 1, '#ffffff', 'center'));
+    text('ENTER OR ESC TO GO BACK', 160, 152, 1, '#9a9a9a', 'center');
+  } else if (game.mode === 'board') {
+    text('TOP 20', 160, 50, 1, '#ffffff', 'center');
+    if (!ranked.board) text('LOADING...', 160, 80, 1, '#ffffff', 'center');
+    else ranked.board.forEach((r, k) => {
+      const x = k < 10 ? 8 : 164, y = 60 + (k % 10) * 8;
+      text((k + 1) + '. ' + r.name, x, y, 1, r.name === (ranked.me && ranked.me.name) ? '#ffffff' : '#c8c8c8');
+      text(rankOf(r.points) + ' ' + r.points, x + 148, y, 1, '#ffffff', 'right');
+    });
+    text('ENTER OR ESC TO GO BACK', 160, 148, 1, '#9a9a9a', 'center');
+  } else if (game.mode === 'join') {
+    text('TYPE YOUR FRIEND\'S ROOM CODE', 160, 66, 1, '#ffffff', 'center');
+    const shown = (net.typed + '____').slice(0, 4).split('').join(' ');
+    text(shown, 160, 82, 5, '#ffffff', 'center');
+    text(net.typed.length === 4 ? 'PRESS ENTER TO JOIN' : 'ESC TO GO BACK', 160, 124, 1, '#ffffff', 'center');
+  } else {
+    if (net.role === 'host') {
+      text('ROOM CODE', 160, 62, 1, '#ffffff', 'center');
+      text(net.code.split('').join(' '), 160, 74, 5, '#ffffff', 'center');
+      text('YOUR FRIEND PICKS JOIN AND TYPES THIS IN', 160, 110, 1, '#ffffff', 'center');
+    } else text('JOINING ROOM ' + net.code, 160, 80, 2, '#ffffff', 'center');
+    text(net.status, 160, 126, 1, T % 50 < 34 ? '#ffffff' : '#9a9a9a', 'center');
+    text('ESC TO CANCEL', 160, 146, 1, '#9a9a9a', 'center');
+  }
+  if (menu.msgT > 0) text(menu.msg, 160, 160, 1, '#ffffff', 'center');
+}
+function draw() {
+  if (game.mode === 'title') { drawTitle(); if (menu.msgT > 0) text(menu.msg, 160, 160, 1, '#ffffff', 'center'); }
+  else if (MENUS[game.mode] || ['join', 'lobby', 'board', 'controls', 'pickname'].includes(game.mode)) drawMenu();
+  else if (game.mode === 'select') drawSelect();
+  else { drawWorld(); drawHud(); drawBanners(); }
+  drawChat();
+  mono();
+  present();
+}
+
+let acc = 0, last = performance.now();
+function frame(now) {
+  acc += Math.min(100, now - last);
+  last = now;
+  while (acc >= 1000 / 60) {
+    step();
+    if (net.role === 'host') sendSnapshot();
+    acc -= 1000 / 60;
+  }
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
