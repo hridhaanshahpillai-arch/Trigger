@@ -374,7 +374,7 @@ const FONTSRC = {
   Z: '### ..# .#. #.. ###', 0: '### #.# #.# #.# ###', 1: '.#. ##. .#. .#. ###', 2: '##. ..# .#. #.. ###', 3: '##. ..# .#. ..# ##.',
   4: '#.# #.# ### ..# ..#', 5: '### #.. ##. ..# ##.', 6: '.## #.. ### #.# ###', 7: '### ..# .#. .#. .#.', 8: '### #.# ### #.# ###',
   9: '### #.# ### ..# ##.', '!': '.#. .#. .#. ... .#.', '.': '... ... ... ... .#.', ':': '... .#. ... .#. ...', '-': '... ... ### ... ...',
-  "'": '.#. .#. ... ... ...', '/': '..# ..# .#. #.. #..', '+': '... .#. ### .#. ...', '?': '##. ..# .#. ... .#.', ';': '... .#. ... .#. #..', '>': '#.. .#. ..# .#. #..', '<': '..# .#. #.. .#. ..#', ' ': '... ... ... ... ...',
+  "'": '.#. .#. ... ... ...', '/': '..# ..# .#. #.. #..', '+': '... .#. ### .#. ...', '?': '##. ..# .#. ... .#.', ';': '... .#. ... .#. #..', '>': '#.. .#. ..# .#. #..', '<': '..# .#. #.. .#. ..#', '*': '... #.# .#. #.# ...', '_': '... ... ... ... ###', ' ': '... ... ... ... ...',
 };
 const FONT = {};
 for (const k in FONTSRC) FONT[k] = FONTSRC[k].split(' ');
@@ -1050,9 +1050,132 @@ async function signInQuiet() {
     if (!s.session) { const { error } = await ranked.db.auth.signInAnonymously(); if (error) return; }
     const { data } = await ranked.db.rpc('ensure_player');
     if (data) ranked.me = normMe(data);
+    await checkAnon();
   } catch (e) {}
 }
 signInQuiet();
+
+// ---------------------------------------------------------------- accounts: save with a password, sign in anywhere, sign out, delete
+// You sign in with your ranked name and a password. (Supabase wants an email, so the name becomes a made-up one: lixo@trigger.game.)
+const authForm = { kind: '', fields: [], i: 0, msg: '', busy: false };
+const emailFor = name => String(name).toLowerCase().replace(/[^a-z0-9]/g, '_') + '@trigger.game';
+async function checkAnon() {
+  // is this account saved with a password yet, or does it only live in this browser?
+  try { const { data } = await ranked.db.auth.getUser(); ranked.anon = !data.user || data.user.is_anonymous !== false; } catch (e) { ranked.anon = true; }
+}
+function loginOptions() {
+  return ranked.anon ? ['SAVE ACCOUNT - SET A PASSWORD', 'SIGN IN TO AN ACCOUNT', 'DELETE ACCOUNT']
+                     : ['SIGN IN TO ANOTHER ACCOUNT', 'CHANGE PASSWORD', 'SIGN OUT', 'DELETE ACCOUNT'];
+}
+function openAuthForm(kind) {
+  const f = { save: [['NEW PASSWORD', true], ['TYPE IT AGAIN', true]], change: [['NEW PASSWORD', true], ['TYPE IT AGAIN', true]],
+              signin: [['NAME', false], ['PASSWORD', true]], delete: [['TYPE DELETE TO CONFIRM', false]] }[kind];
+  Object.assign(authForm, { kind, fields: f.map(([label, secret]) => ({ label, secret, value: '' })), i: 0, msg: '', busy: false });
+  game.mode = 'authform';
+}
+function loginAction(item) {
+  if (item.startsWith('SAVE ACCOUNT')) openAuthForm('save');
+  else if (item.startsWith('SIGN IN')) openAuthForm('signin');
+  else if (item === 'CHANGE PASSWORD') openAuthForm('change');
+  else if (item === 'DELETE ACCOUNT') openAuthForm('delete');
+  else if (item === 'SIGN OUT') signOutNow();
+}
+async function submitAuth() {
+  const f = authForm, v = f.fields.map(x => x.value);
+  if (f.busy) return;
+  const fail = m => { f.msg = String(m || 'SOMETHING WENT WRONG').toUpperCase().slice(0, 60); f.busy = false; sfx.empty(); };
+  if ((f.kind === 'save' || f.kind === 'change') && v[0].length < 6) return fail('PASSWORD NEEDS AT LEAST 6 CHARACTERS');
+  if ((f.kind === 'save' || f.kind === 'change') && v[0] !== v[1]) return fail('THE TWO PASSWORDS DON\'T MATCH');
+  if (f.kind === 'delete' && v[0] !== 'DELETE') return fail('TYPE THE WORD DELETE TO CONFIRM');
+  f.busy = true; f.msg = 'WORKING...';
+  try {
+    if (f.kind === 'save') {
+      // turn this browser-only account into a proper one: the name becomes the sign-in, plus the password
+      let r = await ranked.db.auth.updateUser({ email: emailFor(ranked.me.name) });
+      if (r.error) return fail(r.error.message);
+      r = await ranked.db.auth.updateUser({ password: v[0] });
+      if (r.error) return fail(r.error.message);
+    } else if (f.kind === 'change') {
+      const r = await ranked.db.auth.updateUser({ password: v[0] });
+      if (r.error) return fail(r.error.message);
+    } else if (f.kind === 'signin') {
+      const r = await ranked.db.auth.signInWithPassword({ email: emailFor(v[0].trim()), password: v[1] });
+      if (r.error) return fail(r.error.message.includes('Invalid') ? 'WRONG NAME OR PASSWORD' : r.error.message);
+      ranked.me = null;
+      const { data } = await ranked.db.rpc('ensure_player');
+      ranked.me = normMe(data);
+    } else if (f.kind === 'delete') {
+      const r = await ranked.db.rpc('delete_account');
+      if (r.error) return fail(r.error.message);
+      await ranked.db.auth.signOut();
+      ranked.me = null;
+      await signInQuiet();                               // a fresh, empty player
+    }
+    await checkAnon();
+    shop.msg = { save: 'ACCOUNT SAVED - SIGN IN ANYWHERE WITH YOUR NAME', change: 'PASSWORD CHANGED', signin: 'SIGNED IN AS ' + (ranked.me && ranked.me.name), delete: 'ACCOUNT DELETED' }[f.kind];
+    shop.msgT = 200; sfx.rack();
+    f.busy = false;
+    game.mode = f.kind === 'delete' ? 'menu' : 'account'; shop.tab = 2; shop.i = 0;
+  } catch (e) { fail(e.message); }
+}
+async function signOutNow() {
+  await ranked.db.auth.signOut();
+  ranked.me = null;
+  await signInQuiet();                                   // carry on as a new guest player in this browser
+  shop.msg = 'SIGNED OUT'; shop.msgT = 150; shop.i = 0;
+  game.mode = 'menu';
+}
+function typeInto(field, s) {
+  // names are capitals, numbers and spaces; passwords can be anything
+  for (const key of s) {
+    if (field.secret) { if (field.value.length < 30 && key >= ' ') field.value += key; }
+    else { const ch = key.toUpperCase(); if (/[A-Z0-9 ]/.test(ch) && field.value.length < 22) field.value += ch; }
+  }
+}
+// Ctrl+V pastes into the box you're on (handy for a password you've saved somewhere)
+addEventListener('paste', e => {
+  if (game.mode !== 'authform') return;
+  typeInto(authForm.fields[authForm.i], (e.clipboardData || window.clipboardData).getData('text').trim());
+  authForm.msg = '';
+  e.preventDefault();
+});
+addEventListener('keydown', e => {
+  if (game.mode !== 'authform') return;
+  if (e.ctrlKey || e.metaKey) return;                    // let Ctrl+V and friends through to the paste above
+  const f = authForm, field = f.fields[f.i];
+  e.preventDefault();
+  if (e.key === 'Escape') { game.mode = 'account'; shop.tab = 2; escHeld = true; return; }
+  if (e.key === 'Enter') { if (f.i < f.fields.length - 1) f.i++; else submitAuth(); enterHeld = true; return; }
+  if (e.key === 'Tab' || e.key === 'ArrowDown') { f.i = (f.i + 1) % f.fields.length; return; }
+  if (e.key === 'ArrowUp') { f.i = (f.i + f.fields.length - 1) % f.fields.length; return; }
+  if (e.key === 'Backspace') { field.value = field.value.slice(0, -1); return; }
+  if (e.key.length !== 1) return;
+  typeInto(field, e.key);
+  f.msg = '';
+});
+function drawAuthForm() {
+  ctx.drawImage(BG, 0, 0);
+  const f = authForm;
+  const titles = { save: 'SAVE YOUR ACCOUNT', change: 'CHANGE PASSWORD', signin: 'SIGN IN', delete: 'DELETE ACCOUNT' };
+  text(titles[f.kind], 160, 20, 2, '#ffffff', 'center');
+  if (f.kind === 'save') text('YOU\'LL SIGN IN WITH YOUR NAME: ' + (ranked.me ? ranked.me.name : ''), 160, 38, 1, '#c8c8c8', 'center');
+  if (f.kind === 'delete') text('THIS WIPES YOUR COINS, KEYS, ITEMS AND RANK FOREVER', 160, 38, 1, '#ffffff', 'center');
+  f.fields.forEach((fl, k) => {
+    const y = 56 + k * 30;
+    text(fl.label, 60, y, 1, '#9a9a9a');
+    box(60, y + 8, 200, 14, k === f.i);
+    const shown = fl.secret ? '*'.repeat(fl.value.length) : fl.value;
+    text(shown + (k === f.i && T % 30 < 15 ? '_' : ''), 64, y + 12, 1, '#ffffff');
+    hit('authfield' + k, 58, y + 6, 204, 18, () => { f.i = k; });
+  });
+  if (f.msg) text(f.msg, 160, 124, 1, '#ffffff', 'center');
+  const go = { save: 'SAVE', change: 'CHANGE', signin: 'SIGN IN', delete: 'DELETE FOREVER' }[f.kind];
+  box(110, 136, 100, 12, true);
+  text(go, 160, 139, 1, '#ffffff', 'center');
+  hit('authgo', 108, 134, 104, 16, submitAuth);
+  text('ENTER - NEXT / ' + go + '    ESC - CANCEL', 160, 167, 1, '#9a9a9a', 'center');
+  hit('authback', 100, 163, 120, 12, () => { game.mode = 'account'; shop.tab = 2; });
+}
 // Account, Shop and Ranked all need a name; the first time, pick one, then carry on to where you were going
 async function needProfile(next) {
   ranked.after = next;
@@ -1110,7 +1233,7 @@ function updateProfileScreens(escPressed, enterPressed) {
     return;
   }
   if (escPressed) { goTo('menu', 0); menu.col = 1; menu.si = game.mode === 'shop' ? 1 : 0; return; }
-  const tabs = game.mode === 'shop' ? 4 : 2;
+  const tabs = game.mode === 'shop' ? 4 : 3;
   if (tabL || tabR) { shop.tab = (shop.tab + (tabR ? 1 : tabs - 1)) % tabs; shop.i = 0; shop.row = 0; sfx.click(); return; }
   if (!ranked.me) return;
   if (game.mode === 'account') {
@@ -1120,6 +1243,11 @@ function updateProfileScreens(escPressed, enterPressed) {
       const a = ACHIEVEMENTS[shop.i];
       if (enterPressed && !ranked.me.claimed.includes(a[0]) && progress(a[3]) >= a[4])
         shopCall('claim_achievement', { aid: a[0] }, () => { shop.msg = '+' + a[5] + ' COINS'; shop.msgT = 150; sfx.rack(); });
+    } else if (shop.tab === 2) {                         // login: save, sign in, sign out, delete
+      const opts = loginOptions();
+      if (up) shop.i = Math.max(0, shop.i - 1);
+      if (down) shop.i = Math.min(opts.length - 1, shop.i + 1);
+      if (enterPressed && opts[shop.i]) loginAction(opts[shop.i]);
     } else {                                             // locker: what you own
       const list = (ranked.me.owned || []).filter(id => ITEMS[id]);
       gridMove(list.length, 6, left, right, up, down);
@@ -1245,7 +1373,7 @@ function drawProfileScreens() {
   if (!ranked.me) { text(ranked.status || 'SIGNING IN...', 160, 80, 1, '#ffffff', 'center'); return; }
   const me = ranked.me;
   if (game.mode === 'account') {
-    drawTabs(['ACHIEVEMENTS', 'LOCKER']);
+    drawTabs(['ACHIEVEMENTS', 'LOCKER', 'LOGIN']);
     // you, with what you're wearing
     const show = { key: 'rex', skin: 'rex', x: 286, y: 122, face: -1, flash: 0, state: 'idle', cos: myCos() };
     drawFighter(show, 'shoot0');
@@ -1260,6 +1388,16 @@ function drawProfileScreens() {
         text(a[1], 44, y + 1, 1, '#ffffff');
         plain(a[2], 44, y + 8, G2);
         text(got ? 'DONE' : done ? 'CLAIM +' + a[5] : have + '/' + a[4] + '  +' + a[5], 212, y + 4, 1, done && !got ? '#ffffff' : '#9a9a9a', 'right');
+      });
+    } else if (shop.tab === 2) {
+      // login: is this account saved, and the buttons to save it, sign in, sign out or delete it
+      text(ranked.anon ? 'THIS ACCOUNT ONLY LIVES IN THIS BROWSER' : 'SIGNED IN AS ' + me.name, 128, 42, 1, '#ffffff', 'center');
+      plain(ranked.anon ? 'SET A PASSWORD TO KEEP IT AND PLAY ANYWHERE' : 'SIGN IN ON ANY COMPUTER WITH YOUR NAME AND PASSWORD', ranked.anon ? 42 : 26, 51, G2);
+      loginOptions().forEach((s, k) => {
+        const y = 64 + k * 20;
+        box(28, y, 200, 13, k === shop.i, s === 'DELETE ACCOUNT' ? '#e0e0e0' : '#ffffff');
+        text(s, 128, y + 4, 1, '#ffffff', 'center');
+        hit('login' + k, 26, y - 2, 204, 17, profileAct, () => { shop.i = k; });
       });
     } else {
       const list = (me.owned || []).filter(id => ITEMS[id]);
@@ -1708,6 +1846,7 @@ function step() {
   if (menu.msgT > 0) menu.msgT--;
   for (const k in KEYS) { TAPS[k] = KEYS[k] && !KEYPREV[k]; KEYPREV[k] = KEYS[k]; }
   if (net.role === 'guest') { guestTick(); return; }
+  if (game.mode === 'authform') return;                  // typing a name or password: the keyboard goes to the form
   if (game.mode === 'account' || game.mode === 'shop' || game.mode === 'crate') { updateProfileScreens(escPressed, enterPressed); return; }
   if (game.mode === 'menu') {
     // the sidebar (ACCOUNT, SHOP) on the left: A/D to go between it and the main buttons
@@ -2168,6 +2307,7 @@ function draw() {
   HITS = [];
   if (game.mode === 'title') { drawTitle(); if (menu.msgT > 0) text(menu.msg, 160, 160, 1, '#ffffff', 'center'); }
   else if (['account', 'shop', 'crate'].includes(game.mode)) drawProfileScreens();
+  else if (game.mode === 'authform') drawAuthForm();
   else if (MENUS[game.mode] || ['join', 'lobby', 'board', 'controls', 'pickname'].includes(game.mode)) drawMenu();
   else if (game.mode === 'select') drawSelect();
   else { drawWorld(); drawHud(); drawBanners(); }

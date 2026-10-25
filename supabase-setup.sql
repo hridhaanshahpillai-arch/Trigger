@@ -208,6 +208,18 @@ begin
   return json_build_object('role', 'host');
 end $$;
 
+-- delete your own account: your player, your matches, and your sign-in, all gone for good
+create or replace function public.delete_account() returns void
+language plpgsql security definer set search_path = public, auth as $$
+declare me uuid := auth.uid();
+begin
+  if me is null then raise exception 'NOT SIGNED IN'; end if;
+  delete from public.queue where player = me;
+  delete from public.matches where host = me or guest = me;
+  delete from public.players where id = me;
+  delete from auth.users where id = me;
+end $$;
+
 create or replace function public.leave_queue() returns void
 language sql security definer set search_path = public as $$
   delete from queue where player = auth.uid();
